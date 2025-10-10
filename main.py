@@ -15,6 +15,8 @@ from telebot import types
 from datetime import datetime
 from flask import Flask
 
+app = Flask(__name__)
+
 load_dotenv()
 
 # === BOT TOKEN ===
