@@ -1829,7 +1829,7 @@ if __name__ == "__main__":
     cleanup_thread.start()
     
     # Start bot in a background thread
-    threading.Thread(target=run_bot, daemon=True).start()
+    threading.Thread(target=bot.infinity_polling, daemon=True).start()
     
     # Run small web server so Render detects an open port
     port = int(os.environ.get("PORT", 10000))
