@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 import telebot
 from telebot import types
 from datetime import datetime
+from flask import Flask
 
 load_dotenv()
 
@@ -1825,7 +1826,10 @@ if __name__ == "__main__":
     cleanup_thread = threading.Thread(target=periodic_cleanup, daemon=True)
     cleanup_thread.start()
     
-    try:
-        bot.infinity_polling()
-    except Exception as e:
-        print(f"Bot crashed: {e}")
+    # Start bot in a background thread
+    threading.Thread(target=run_bot, daemon=True).start()
+    
+    # Run small web server so Render detects an open port
+    port = int(os.environ.get("PORT", 10000))
+    print(f"🌍 Starting Flask web server on port {port}")
+    app.run(host="0.0.0.0", port=port)
