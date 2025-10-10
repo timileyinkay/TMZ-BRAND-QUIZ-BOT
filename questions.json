@@ -1,0 +1,155 @@
+{
+  "questions": [
+    {
+      "question": "Before Europe invented the word 'civilization' 🌍, who already built wonders that touched heaven but never bragged?",
+      "options": [
+        "Greece shouting Olympus",
+        "Rome with borrowed gods",
+        "Kemet (Ancient Egypt) in silence",
+        "The British drawing maps"
+      ],
+      "correct_index": 2
+    },
+    {
+      "question": "If knowledge was gold, which African city would’ve been richer than Wall Street? 💰📚",
+      "options": [
+        "Lagos",
+        "Timbuktu",
+        "Alexandria",
+        "Carthage"
+      ],
+      "correct_index": 1
+    },
+    {
+      "question": "When Mansa Musa sprinkled generosity like rainfall ☀️💸, who caught cold financially?",
+      "options": [
+        "Cairo bankers",
+        "His 80 camels",
+        "The slaves following him",
+        "The sand of the Sahara"
+      ],
+      "correct_index": 0
+    },
+    {
+      "question": "Benin’s bronze heads were too perfect 🗿 — so Europeans said what instead of 'thank you'?",
+      "options": [
+        "It must be witchcraft",
+        "Teach us your art",
+        "We’ll return it later",
+        "We’ll display it proudly in Benin"
+      ],
+      "correct_index": 0
+    },
+    {
+      "question": "If Great Zimbabwe was built without cement 🧱, what really held the stones together?",
+      "options": [
+        "Ancient glue",
+        "Faith and skill",
+        "Slave labor",
+        "Luck from the ancestors"
+      ],
+      "correct_index": 1
+    },
+    {
+      "question": "When the traders came with mirrors and rum 🍾, who actually saw the reflection of betrayal?",
+      "options": [
+        "The white men",
+        "The kings who sold rivals",
+        "The villagers dancing",
+        "Nobody noticed"
+      ],
+      "correct_index": 1
+    },
+    {
+      "question": "If the Atlantic had a voice 🌊, what would it say about those it swallowed?",
+      "options": [
+        "They drowned for greed",
+        "They sang freedom before sinking",
+        "They forgot home",
+        "The ocean never tells"
+      ],
+      "correct_index": 1
+    },
+    {
+      "question": "When Haiti burned for freedom 🔥, who felt the heat from across the ocean?",
+      "options": [
+        "Every European empire",
+        "Only France",
+        "The Caribbean islands",
+        "Nobody noticed"
+      ],
+      "correct_index": 0
+    },
+    {
+      "question": "When Yaa Asantewaa grabbed her spear 👑⚔️, what really made the British tremble?",
+      "options": [
+        "Her army’s size",
+        "Her courage louder than cannons",
+        "Her gold ornaments",
+        "Her royal accent"
+      ],
+      "correct_index": 1
+    },
+    {
+      "question": "If Samori Touré fought 16 years nonstop 🪖, who was truly defending civilization?",
+      "options": [
+        "The French colonizers",
+        "Samori and his people",
+        "The desert",
+        "The Berlin Conference"
+      ],
+      "correct_index": 1
+    },
+    {
+      "question": "When the Aba women marched 1929 👩🏾🔥, what shocked the British most?",
+      "options": [
+        "That women could read",
+        "That market women had more courage than soldiers",
+        "That they used charms",
+        "That they danced before protest"
+      ],
+      "correct_index": 1
+    },
+    {
+      "question": "When Nkrumah shouted 'Seek ye first the political kingdom' 🇬🇭, who did he sound like — preacher or president?",
+      "options": [
+        "A preacher leading a revolution",
+        "A soldier planning war",
+        "A poet dreaming too loud",
+        "A comedian on stage"
+      ],
+      "correct_index": 0
+    },
+    {
+      "question": "When Lumumba died for unity ⚰️, what stayed alive?",
+      "options": [
+        "His speeches",
+        "His enemies’ fear",
+        "Congo’s confusion",
+        "Africa’s dream of oneness"
+      ],
+      "correct_index": 3
+    },
+    {
+      "question": "After 27 years behind bars ⛓️, Mandela came out smiling. What broke — the chains or the world’s pride?",
+      "options": [
+        "Only the chains",
+        "The world’s pride",
+        "Both at once",
+        "Neither, just his patience"
+      ],
+      "correct_index": 2
+    },
+    {
+      "question": "If Africa is a phoenix rising from ashes 🔥, who tried to bury the fire but ended up warming their own hands?",
+      "options": [
+        "The colonizers",
+        "The historians",
+        "The traders",
+        "The new generation"
+      ],
+      "correct_index": 0
+    }
+  ],
+  "question_time": 30
+}
