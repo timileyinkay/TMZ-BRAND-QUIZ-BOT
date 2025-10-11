@@ -558,6 +558,41 @@ def handle_start(message):
         schedule_auto_delete(chat_id, welcome_msg.message_id, CONFIG["START_MESSAGE_DELAY"])
         global_leaderboard = leaderboard_manager.show_global_leaderboard(chat_id)
 
+def process_name_step(message, user_id, chat_id):
+    """Process the user's name and send welcome message"""
+    try:
+        name = message.text.strip()
+        
+        # Delete the user's name message for privacy
+        try:
+            bot.delete_message(chat_id, message.message_id)
+        except:
+            pass
+        
+        # Save participant info
+        save_participant_info(user_id, name, chat_id)
+        
+        # Send welcome message with commands
+        welcome_msg = bot.send_message(
+            chat_id, 
+            f"🔥 Welcome to TMZ BRAND Quiz, {name}! 🔥\n\n"
+            "Use /start_quiz to begin the quiz.\n"
+            "Use /leaderboard to view global rankings.\n"
+            "Use /myinfo to see your statistics.",
+            parse_mode='HTML'
+        )
+        
+        # Auto-delete welcome message after the configured delay
+        schedule_auto_delete(chat_id, welcome_msg.message_id, CONFIG["START_MESSAGE_DELAY"])
+        
+        # Show global leaderboard
+        leaderboard_manager.show_global_leaderboard(chat_id)
+        
+    except Exception as e:
+        print(f"Error processing name: {e}")
+        error_msg = bot.send_message(chat_id, "❌ Error processing your name. Please try /start again.")
+        schedule_auto_delete(chat_id, error_msg.message_id)
+        
 @bot.message_handler(commands=['leaderboard', 'reload', 'rankings'])
 def handle_leaderboard(message):
     """Show global leaderboard"""
