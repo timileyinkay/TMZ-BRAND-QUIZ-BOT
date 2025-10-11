@@ -20,7 +20,7 @@ app = Flask(__name__)
 load_dotenv()
 
 # === BOT TOKEN ===
-TOKEN = os.getenv("BOT_TOKEN") or "7564339168:AAH0pNQ6DAGZWyAG8QCsEGF7_7ILWPm5Cxc"
+TOKEN = os.getenv("BOT_TOKEN") or "8335451882:AAGy5lwKBby2Ue7tkktNMeLKfYYNwU8YHu4"
 bot = telebot.TeleBot(TOKEN)
 
 # === CONFIGURATION ===
