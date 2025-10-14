@@ -13,6 +13,9 @@ from dotenv import load_dotenv
 import telebot
 from telebot import types
 from datetime import datetime
+from flask import Flask
+
+app = Flask(__name__)
 
 load_dotenv()
 
@@ -30,8 +33,8 @@ CONFIG = {
     "QUIZ_COMPLETION_FILE": "quiz_completed.json",
     "ADMIN_IDS": [6011041717],  # Replace with your user ID
     "QUESTION_TRANSITION_DELAY": 2,
-    "AUTO_DELETE_DELAY": 30,  # 30 seconds for most messages
-    "START_MESSAGE_DELAY": 300  # 5 minutes for start message
+    "AUTO_DELETE_DELAY": 100,  # 1 minutes for most messages
+    "START_MESSAGE_DELAY": 60  # ⚡ CHANGED: 1 minute for start message (was 480)
 }
 
 # === MESSAGE AUTO-DELETION SYSTEM ===
@@ -274,10 +277,32 @@ def get_state(chat_id):
     return chat_state[chat_id]
 
 def clear_state(chat_id):
+    """Enhanced state clearing with proper cleanup"""
     if chat_id in chat_state:
         with chat_state_lock:
             if chat_id in chat_state:
+                state = chat_state[chat_id]
+                # Stop any running countdown
+                if hasattr(state, 'stop_countdown'):
+                    state.stop_countdown = True
+                # Stop countdown thread if running
+                if state.countdown_thread and state.countdown_thread.is_alive():
+                    state.countdown_thread.join(timeout=1)
                 del chat_state[chat_id]
+                print(f"✅ Cleared state for chat {chat_id}")
+
+def clear_all_states():
+    """Clear all quiz states (Admin only)"""
+    with chat_state_lock:
+        chat_ids = list(chat_state.keys())
+        for chat_id in chat_ids:
+            state = chat_state[chat_id]
+            if hasattr(state, 'stop_countdown'):
+                state.stop_countdown = True
+            if state.countdown_thread and state.countdown_thread.is_alive():
+                state.countdown_thread.join(timeout=1)
+            del chat_state[chat_id]
+        print(f"✅ Cleared all {len(chat_ids)} chat states")
 
 # === COUNTDOWN TIMER ===
 def start_countdown(chat_id, duration):
@@ -292,8 +317,8 @@ def start_countdown(chat_id, duration):
         try:
             countdown_msg = bot.send_message(chat_id, f"⏰ Time remaining: **{remaining}s**", parse_mode='Markdown')
             state.countdown_message_id = countdown_msg.message_id
-            # Auto-delete countdown message
-            schedule_auto_delete(chat_id, countdown_msg.message_id)
+            # ⚡ CHANGED: Auto-delete countdown message AFTER the full duration
+            schedule_auto_delete(chat_id, countdown_msg.message_id, duration)
         except:
             return
         
@@ -437,7 +462,7 @@ def make_keyboard(q_index, questions):
 
 # === ADMIN PANEL ===
 def make_admin_keyboard():
-    """Create admin panel keyboard"""
+    """Create admin panel keyboard with state management"""
     keyboard = types.InlineKeyboardMarkup(row_width=2)
     
     buttons = [
@@ -452,7 +477,10 @@ def make_admin_keyboard():
         types.InlineKeyboardButton("🚪 Close Quiz", callback_data="admin_close_quiz"),
         types.InlineKeyboardButton("📥 Export Data", callback_data="admin_export"),
         types.InlineKeyboardButton("🔓 Reopen Quiz", callback_data="admin_reopen_quiz"),
-        types.InlineKeyboardButton("❌ Close Panel", callback_data="admin_close")
+        types.InlineKeyboardButton("🗑️ Clear State", callback_data="admin_clear_state"),
+        types.InlineKeyboardButton("🔍 State Info", callback_data="admin_state_info"),
+        types.InlineKeyboardButton("❌ Close Panel", callback_data="admin_close"),
+        types.InlineKeyboardButton("🔄 New Round", callback_data="admin_new_round")
     ]
     
     for i in range(0, len(buttons), 2):
@@ -475,19 +503,30 @@ def get_admin_state(user_id):
     return admin_edit_state[user_id]
 
 def clear_admin_state(user_id):
+    """Enhanced admin state clearing"""
     if user_id in admin_edit_state:
         with admin_state_lock:
             if user_id in admin_edit_state:
                 del admin_edit_state[user_id]
+                print(f"✅ Cleared admin state for user {user_id}")
+
+def clear_all_admin_states():
+    """Clear all admin states"""
+    with admin_state_lock:
+        user_ids = list(admin_edit_state.keys())
+        for user_id in user_ids:
+            del admin_edit_state[user_id]
+        print(f"✅ Cleared all {len(user_ids)} admin states")
 
 def cleanup_old_admin_states():
-    """Clean up admin states older than 1 hour"""
+    """Enhanced cleanup of old admin states"""
     current_time = time.time()
     with admin_state_lock:
         for user_id in list(admin_edit_state.keys()):
             state = admin_edit_state[user_id]
             if current_time - state.get('last_activity', 0) > 3600:  # 1 hour
                 del admin_edit_state[user_id]
+                print(f"🕒 Cleared expired admin state for user {user_id}")
 
 # === COMMANDS ===
 @bot.message_handler(commands=['start'])
@@ -495,11 +534,7 @@ def handle_start(message):
     user_id = message.from_user.id
     chat_id = message.chat.id
     
-    # Delete the command message
-    try:
-        bot.delete_message(chat_id, message.message_id)
-    except:
-        pass
+    # ⚠️ REMOVED the immediate deletion - let auto-delete handle it after 1 minute
     
     participant_name = get_participant_name(user_id)
     
@@ -508,7 +543,7 @@ def handle_start(message):
             "👋 Welcome to TMZ BRAND QUIZ BOT! 🔥\n\n"
             "Please enter your name to register:"
         )
-        # Auto-delete registration prompt after 5 minutes
+        # Auto-delete registration prompt after 1 minute
         schedule_auto_delete(chat_id, msg.message_id, CONFIG["START_MESSAGE_DELAY"])
         bot.register_next_step_handler(msg, process_name_step, user_id, chat_id)
     else:
@@ -519,39 +554,45 @@ def handle_start(message):
             "Use /myinfo to see your statistics.",
             parse_mode='HTML'
         )
-        # Auto-delete welcome message after 5 minutes
+        # Auto-delete welcome message after 1 minute
         schedule_auto_delete(chat_id, welcome_msg.message_id, CONFIG["START_MESSAGE_DELAY"])
-        
         global_leaderboard = leaderboard_manager.show_global_leaderboard(chat_id)
 
 def process_name_step(message, user_id, chat_id):
-    # Delete the user's name input message
+    """Process the user's name and send welcome message"""
     try:
-        bot.delete_message(chat_id, message.message_id)
-    except:
-        pass
-    
-    name = message.text.strip()
-    if len(name) < 2:
-        msg = bot.send_message(chat_id, "Please enter a valid name (at least 2 characters):")
-        schedule_auto_delete(chat_id, msg.message_id)
-        bot.register_next_step_handler(msg, process_name_step, user_id, chat_id)
-        return
-    
-    save_participant_info(user_id, name, chat_id)
-    
-    welcome_msg = bot.send_message(chat_id,
-        f"✅ Registration successful, {name}! 🎉\n\n"
-        "Use /start_quiz to begin the quiz.\n"
-        "Use /leaderboard to view global rankings.\n"
-        "Use /myinfo to see your statistics.",
-        parse_mode='HTML'
-    )
-    # Auto-delete welcome message after 5 minutes
-    schedule_auto_delete(chat_id, welcome_msg.message_id, CONFIG["START_MESSAGE_DELAY"])
-    
-    global_leaderboard = leaderboard_manager.show_global_leaderboard(chat_id)
-
+        name = message.text.strip()
+        
+        # Delete the user's name message for privacy
+        try:
+            bot.delete_message(chat_id, message.message_id)
+        except:
+            pass
+        
+        # Save participant info
+        save_participant_info(user_id, name, chat_id)
+        
+        # Send welcome message with commands
+        welcome_msg = bot.send_message(
+            chat_id, 
+            f"🔥 Welcome to TMZ BRAND Quiz, {name}! 🔥\n\n"
+            "Use /start_quiz to begin the quiz.\n"
+            "Use /leaderboard to view global rankings.\n"
+            "Use /myinfo to see your statistics.",
+            parse_mode='HTML'
+        )
+        
+        # Auto-delete welcome message after the configured delay
+        schedule_auto_delete(chat_id, welcome_msg.message_id, CONFIG["START_MESSAGE_DELAY"])
+        
+        # Show global leaderboard
+        leaderboard_manager.show_global_leaderboard(chat_id)
+        
+    except Exception as e:
+        print(f"Error processing name: {e}")
+        error_msg = bot.send_message(chat_id, "❌ Error processing your name. Please try /start again.")
+        schedule_auto_delete(chat_id, error_msg.message_id)
+        
 @bot.message_handler(commands=['leaderboard', 'reload', 'rankings'])
 def handle_leaderboard(message):
     """Show global leaderboard"""
@@ -618,6 +659,131 @@ def handle_admin(message):
     )
     schedule_auto_delete(message.chat.id, msg.message_id)
 
+@bot.message_handler(commands=['clear_state'])
+def handle_clear_state(message):
+    """Admin command to clear state for current chat"""
+    user_id = message.from_user.id
+    if not is_admin(user_id):
+        msg = bot.send_message(message.chat.id, "❌ Admin only command.")
+        schedule_auto_delete(message.chat.id, msg.message_id)
+        return
+    
+    # Delete the command message
+    try:
+        bot.delete_message(message.chat.id, message.message_id)
+    except:
+        pass
+    
+    chat_id = message.chat.id
+    clear_state(chat_id)
+    clear_admin_state(user_id)
+    
+    msg = bot.send_message(message.chat.id, "✅ All states cleared for this chat and user.")
+    schedule_auto_delete(message.chat.id, msg.message_id)
+
+@bot.message_handler(commands=['state_info'])
+def handle_state_info(message):
+    """Admin command to check current states"""
+    user_id = message.from_user.id
+    if not is_admin(user_id):
+        msg = bot.send_message(message.chat.id, "❌ Admin only command.")
+        schedule_auto_delete(message.chat.id, msg.message_id)
+        return
+    
+    # Delete the command message
+    try:
+        bot.delete_message(message.chat.id, message.message_id)
+    except:
+        pass
+    
+    chat_id = message.chat.id
+    
+    state_info = "🔍 <b>Current States</b>\n\n"
+    
+    # Quiz states
+    state_info += f"<b>Active Quiz Chats:</b> {len(chat_state)}\n"
+    for cid, state in list(chat_state.items()):
+        status = "🟢 Running" if state.is_running else "🟡 Idle"
+        state_info += f"  • Chat {cid}: {status} (Q{state.current_q + 1}/{len(state.questions)})\n"
+    
+    # Admin states
+    state_info += f"\n<b>Active Admin Sessions:</b> {len(admin_edit_state)}\n"
+    for uid, admin_state in list(admin_edit_state.items()):
+        mode = admin_state.get('mode', 'None')
+        state_info += f"  • User {uid}: {mode}\n"
+    
+    msg = bot.send_message(chat_id, state_info, parse_mode='HTML')
+    schedule_auto_delete(message.chat.id, msg.message_id)
+
+@bot.message_handler(commands=['reset_all_data'])
+def handle_reset_all_data(message):
+    """Admin command to completely reset all data for next round"""
+    user_id = message.from_user.id
+    if not is_admin(user_id):
+        msg = bot.send_message(message.chat.id, "❌ Admin only command.")
+        schedule_auto_delete(message.chat.id, msg.message_id)
+        return
+    
+    # Delete the command message
+    try:
+        bot.delete_message(message.chat.id, message.message_id)
+    except:
+        pass
+    
+    # Reset all data
+    reset_all_quiz_data()
+    
+    msg = bot.send_message(
+        message.chat.id,
+        "✅ **COMPLETE DATA RESET**\n\n"
+        "All user data has been erased for the next round!\n"
+        "• Quiz completion records cleared\n"
+        "• All participant data reset\n"
+        "• Users can start fresh",
+        parse_mode='HTML'
+    )
+    schedule_auto_delete(message.chat.id, msg.message_id)
+
+def reset_all_quiz_data():
+    """Completely reset all quiz data for new round"""
+    try:
+        # 1. Reset quiz completion data
+        completion_data = {
+            "completed_users": [],
+            "quiz_active": True
+        }
+        with open(CONFIG["QUIZ_COMPLETION_FILE"], 'w', encoding='utf-8') as f:
+            json.dump(completion_data, f, indent=2, ensure_ascii=False)
+        
+        # 2. Reset participant data (keep names but reset scores and completion)
+        participants = load_participants()
+        for user_id, data in participants.items():
+            # Keep name and basic info, reset everything else
+            participants[user_id] = {
+                "name": data.get("name", f"User_{user_id}"),
+                "first_seen": data.get("first_seen", datetime.now().strftime("%Y-%m-%dT%H:%M:%S")),
+                "chat_ids": data.get("chat_ids", []),
+                "total_score": 0,
+                "quizzes_completed": 0,
+                "accuracy": 0,
+                "has_completed_current_quiz": False,
+                "last_seen": datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+            }
+        
+        with open(CONFIG["PARTICIPANTS_FILE"], 'w', encoding='utf-8') as f:
+            json.dump(participants, f, indent=2, ensure_ascii=False)
+        
+        # 3. Clear all active states
+        clear_all_states()
+        clear_all_admin_states()
+        
+        print("✅ Complete data reset for new round")
+        return True
+        
+    except Exception as e:
+        print(f"Error resetting data: {e}")
+        return False
+
 @bot.message_handler(commands=['reopen_quiz'])
 def handle_reopen_quiz(message):
     """Reopen quiz (Admin only)"""
@@ -636,6 +802,60 @@ def handle_reopen_quiz(message):
     set_quiz_active(True)
     msg = bot.send_message(message.chat.id, "✅ Quiz reopened! Users can now start the quiz.")
     schedule_auto_delete(message.chat.id, msg.message_id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "admin_new_round")
+def handle_new_round(call):
+    """Handle new round confirmation"""
+    user_id = call.from_user.id
+    if not is_admin(user_id):
+        bot.answer_callback_query(call.id, "❌ Admin only!")
+        return
+    
+    keyboard = types.InlineKeyboardMarkup()
+    keyboard.add(
+        types.InlineKeyboardButton("✅ Yes, Start New Round", callback_data="confirm_new_round"),
+        types.InlineKeyboardButton("❌ Cancel", callback_data="admin_stats")
+    )
+    
+    bot.edit_message_text(
+        "🔄 <b>Start New Round</b>\n\n"
+        "This will:\n"
+        "• Reset all user scores to 0\n"
+        "• Clear quiz completion records\n"
+        "• Allow everyone to play again\n"
+        "• Keep user names and registration\n\n"
+        "Are you sure?",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=keyboard,
+        parse_mode='HTML'
+    )
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "confirm_new_round")
+def handle_confirm_new_round(call):
+    """Confirm and execute new round"""
+    try:
+        if reset_all_quiz_data():
+            bot.edit_message_text(
+                "✅ <b>New Round Started!</b>\n\n"
+                "All user data has been reset.\n"
+                "Everyone can now participate in the new quiz round!",
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode='HTML'
+            )
+        else:
+            bot.edit_message_text(
+                "❌ <b>Error resetting data!</b>",
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode='HTML'
+            )
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        print(f"Error in new round: {e}")
+        bot.answer_callback_query(call.id, "❌ Error starting new round")
 
 # === ADMIN CALLBACK HANDLERS ===
 @bot.callback_query_handler(func=lambda call: call.data and call.data.startswith("admin_"))
@@ -669,6 +889,10 @@ def handle_admin_callback(call):
         reopen_quiz_confirmation(call)
     elif action == "admin_export":
         export_data(call)
+    elif action == "admin_clear_state":
+        clear_state_confirmation(call)
+    elif action == "admin_state_info":
+        show_state_info(call)
     elif action == "admin_close":
         bot.delete_message(call.message.chat.id, call.message.message_id)
         bot.answer_callback_query(call.id, "Admin panel closed")
@@ -702,6 +926,11 @@ def show_admin_stats(call):
     
     total_score = sum(p.get("total_score", 0) for p in participants.values())
     stats_text += f"   • Total Score: <b>{total_score}</b>\n"
+    
+    # State information
+    stats_text += f"\n🔍 <b>System State:</b>\n"
+    stats_text += f"   • Active Quiz Chats: <b>{len(chat_state)}</b>\n"
+    stats_text += f"   • Active Admin Sessions: <b>{len(admin_edit_state)}</b>\n"
     
     bot.edit_message_text(
         stats_text,
@@ -934,6 +1163,62 @@ def reopen_quiz_confirmation(call):
     )
     bot.answer_callback_query(call.id)
 
+def clear_state_confirmation(call):
+    """Confirm state clearing"""
+    keyboard = types.InlineKeyboardMarkup()
+    keyboard.add(
+        types.InlineKeyboardButton("✅ Clear Current Chat", callback_data="confirm_clear_current"),
+        types.InlineKeyboardButton("🗑️ Clear All States", callback_data="confirm_clear_all"),
+        types.InlineKeyboardButton("❌ Cancel", callback_data="admin_stats")
+    )
+    
+    state_info = "🗑️ <b>Clear States</b>\n\n"
+    state_info += f"Active Quiz Chats: <b>{len(chat_state)}</b>\n"
+    state_info += f"Active Admin Sessions: <b>{len(admin_edit_state)}</b>\n\n"
+    state_info += "Select what to clear:"
+    
+    bot.edit_message_text(
+        state_info,
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=keyboard,
+        parse_mode='HTML'
+    )
+    bot.answer_callback_query(call.id)
+
+def show_state_info(call):
+    """Show detailed state information"""
+    state_info = "🔍 <b>Detailed State Information</b>\n\n"
+    
+    # Quiz states
+    state_info += f"<b>Active Quiz Chats ({len(chat_state)}):</b>\n"
+    for cid, state in list(chat_state.items()):
+        status = "🟢 Running" if state.is_running else "🟡 Idle"
+        participants_count = len(state.participants)
+        state_info += f"  • Chat {cid}: {status}\n"
+        state_info += f"    Q{state.current_q + 1}/{len(state.questions)} | Participants: {participants_count}\n"
+    
+    # Admin states
+    state_info += f"\n<b>Active Admin Sessions ({len(admin_edit_state)}):</b>\n"
+    for uid, admin_state in list(admin_edit_state.items()):
+        mode = admin_state.get('mode', 'None')
+        last_active = time.time() - admin_state.get('last_activity', 0)
+        state_info += f"  • User {uid}: {mode} ({last_active:.0f}s ago)\n"
+    
+    keyboard = types.InlineKeyboardMarkup()
+    keyboard.add(types.InlineKeyboardButton("🔄 Refresh", callback_data="admin_state_info"))
+    keyboard.add(types.InlineKeyboardButton("🗑️ Clear States", callback_data="admin_clear_state"))
+    keyboard.add(types.InlineKeyboardButton("🔙 Back", callback_data="admin_stats"))
+    
+    bot.edit_message_text(
+        state_info,
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=keyboard,
+        parse_mode='HTML'
+    )
+    bot.answer_callback_query(call.id)
+
 def export_data(call):
     """Export quiz data"""
     participants = load_participants()
@@ -1098,13 +1383,12 @@ def run_quiz(chat_id, user_id):
                 chat_id, state.participants, len(questions)
             )
             
-            # Clear state
-            clear_state(chat_id)
-            
     except Exception as e:
         print(f"Error in quiz: {e}")
         msg = bot.send_message(chat_id, "❌ An error occurred during the quiz. Please try again.")
         schedule_auto_delete(chat_id, msg.message_id)
+    finally:
+        # Always clear state whether quiz completes or errors
         clear_state(chat_id)
 
 @bot.callback_query_handler(func=lambda call: call.data and call.data.startswith("ans|"))
@@ -1196,6 +1480,7 @@ def handle_answer(call):
             else:
                 correct_letter = chr(65 + state.questions[q_idx].correct_index)
                 bot.answer_callback_query(call.id, f"❌ Wrong!")
+                feedback = f"❌ <b>WRONG!</b> {participant_name}"
 
             # Send feedback message
             feedback_msg = bot.send_message(chat_id, feedback, parse_mode='HTML')
@@ -1486,7 +1771,7 @@ def handle_confirm_delete(call):
         bot.answer_callback_query(call.id, "❌ Error deleting question")
 
 # === CONFIRMATION HANDLERS ===
-@bot.callback_query_handler(func=lambda call: call.data in ["confirm_reset", "confirm_close", "confirm_reopen"])
+@bot.callback_query_handler(func=lambda call: call.data in ["confirm_reset", "confirm_close", "confirm_reopen", "confirm_clear_current", "confirm_clear_all"])
 def handle_confirmation(call):
     """Handle reset and close confirmations"""
     try:
@@ -1523,6 +1808,29 @@ def handle_confirmation(call):
             set_quiz_active(True)
             bot.edit_message_text(
                 "✅ <b>Quiz reopened successfully!</b>\n\nNew users can now start the quiz.",
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode='HTML'
+            )
+        
+        elif call.data == "confirm_clear_current":
+            # Clear current chat state
+            clear_state(call.message.chat.id)
+            clear_admin_state(call.from_user.id)
+            bot.edit_message_text(
+                "✅ <b>Current chat and user states cleared!</b>",
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode='HTML'
+            )
+        
+        elif call.data == "confirm_clear_all":
+            # Clear all states
+            clear_all_states()
+            clear_all_admin_states()
+            bot.edit_message_text(
+                f"✅ <b>All states cleared!</b>\n\n"
+                f"Cleared {len(chat_state)} quiz chats and {len(admin_edit_state)} admin sessions.",
                 call.message.chat.id,
                 call.message.message_id,
                 parse_mode='HTML'
@@ -1807,6 +2115,7 @@ if __name__ == "__main__":
     print("📊 Features: One-time quiz, Admin panel, Edit questions, Leaderboard")
     print("⚡ Instant mode: Questions advance when all participants answer")
     print("🗑️ Auto-delete: All messages vanish after 30s, start message after 5min")
+    print("🔧 Enhanced state management with comprehensive clearing")
     
     # Ensure data files exist
     for file in [CONFIG["QUESTIONS_FILE"], CONFIG["PARTICIPANTS_FILE"], CONFIG["QUIZ_COMPLETION_FILE"]]:
@@ -1821,11 +2130,15 @@ if __name__ == "__main__":
         while True:
             time.sleep(3600)  # Run every hour
             cleanup_old_admin_states()
+            print("🕒 Periodic cleanup completed")
     
     cleanup_thread = threading.Thread(target=periodic_cleanup, daemon=True)
     cleanup_thread.start()
     
-    try:
-        bot.infinity_polling()
-    except Exception as e:
-        print(f"Bot crashed: {e}")
+    # Start bot in a background thread
+    threading.Thread(target=bot.infinity_polling, daemon=True).start()
+    
+    # Run small web server so Render detects an open port
+    port = int(os.environ.get("PORT", 10000))
+    print(f"🌍 Starting Flask web server on port {port}")
+    app.run(host="0.0.0.0", port=port)

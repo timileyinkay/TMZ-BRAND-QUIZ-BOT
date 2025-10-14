@@ -468,6 +468,7 @@ def make_admin_keyboard():
     buttons = [
         types.InlineKeyboardButton("📊 View Statistics", callback_data="admin_stats"),
         types.InlineKeyboardButton("👥 View Participants", callback_data="admin_participants"),
+        types.InlineKeyboardButton("👤 Edit User Data", callback_data="admin_edit_user"),
         types.InlineKeyboardButton("❓ View Questions", callback_data="admin_questions"),
         types.InlineKeyboardButton("➕ Add Question", callback_data="admin_add_question"),
         types.InlineKeyboardButton("✏️ Edit Question", callback_data="admin_edit_question"),
@@ -871,6 +872,8 @@ def handle_admin_callback(call):
         show_admin_stats(call)
     elif action == "admin_participants":
         show_participants_list(call)
+    elif action == "admin_edit_user":
+        handle_edit_user(call)
     elif action == "admin_questions":
         show_questions_list(call)
     elif action == "admin_add_question":
@@ -980,6 +983,211 @@ def show_participants_list(call):
         parse_mode='HTML'
     )
     bot.answer_callback_query(call.id)
+
+def handle_edit_user(call):
+    """Start user editing process"""
+    user_id = call.from_user.id
+    if not is_admin(user_id):
+        bot.answer_callback_query(call.id, "❌ Admin only!")
+        return
+    
+    participants = load_participants()
+    
+    if not participants:
+        bot.edit_message_text(
+            "👤 <b>Edit User Data</b>\n\nNo participants registered yet.",
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=make_admin_keyboard(),
+            parse_mode='HTML'
+        )
+        return
+    
+    keyboard = types.InlineKeyboardMarkup()
+    for uid, data in list(participants.items())[:20]:  # Show first 20 users
+        keyboard.add(types.InlineKeyboardButton(
+            f"{data.get('name', 'Unknown')} (ID: {uid})", 
+            callback_data=f"edit_user_{uid}"
+        ))
+    keyboard.add(types.InlineKeyboardButton("🔙 Back", callback_data="admin_stats"))
+    
+    bot.edit_message_text(
+        "👤 <b>Edit User Data</b>\n\nSelect user to edit:",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=keyboard,
+        parse_mode='HTML'
+    )
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda call: call.data and call.data.startswith("edit_user_"))
+def handle_edit_user_select(call):
+    """Handle selection of user to edit"""
+    try:
+        user_id_str = call.data.split("_")[2]
+        participants = load_participants()
+        
+        if user_id_str not in participants:
+            bot.answer_callback_query(call.id, "❌ User not found!")
+            return
+        
+        user_data = participants[user_id_str]
+        
+        # Create detailed user info with editing options
+        text = f"👤 <b>Editing User: {user_data.get('name', 'Unknown')}</b>\n\n"
+        text += f"🆔 User ID: <code>{user_id_str}</code>\n"
+        text += f"⭐ Total Score: <b>{user_data.get('total_score', 0)}</b>\n"
+        text += f"📊 Accuracy: <b>{user_data.get('accuracy', 0):.1f}%</b>\n"
+        text += f"🎯 Quizzes Completed: <b>{user_data.get('quizzes_completed', 0)}</b>\n"
+        text += f"📝 Current Quiz: <b>{'✅ Completed' if user_data.get('has_completed_current_quiz', False) else '❌ Not Completed'}</b>\n"
+        
+        if "first_seen" in user_data:
+            first_seen = datetime.fromisoformat(user_data["first_seen"]).strftime("%Y-%m-%d %H:%M")
+            text += f"📅 First Seen: {first_seen}\n"
+        
+        if "last_seen" in user_data:
+            last_seen = datetime.fromisoformat(user_data["last_seen"]).strftime("%Y-%m-%d %H:%M")
+            text += f"📅 Last Seen: {last_seen}\n"
+        
+        keyboard = types.InlineKeyboardMarkup(row_width=2)
+        keyboard.add(
+            types.InlineKeyboardButton("✏️ Edit Name", callback_data=f"user_edit_name_{user_id_str}"),
+            types.InlineKeyboardButton("⭐ Edit Score", callback_data=f"user_edit_score_{user_id_str}")
+        )
+        keyboard.add(
+            types.InlineKeyboardButton("📊 Edit Accuracy", callback_data=f"user_edit_accuracy_{user_id_str}"),
+            types.InlineKeyboardButton("🎯 Edit Quizzes", callback_data=f"user_edit_quizzes_{user_id_str}")
+        )
+        keyboard.add(
+            types.InlineKeyboardButton("✅ Toggle Completion", callback_data=f"user_toggle_completion_{user_id_str}"),
+            types.InlineKeyboardButton("🗑️ Reset User", callback_data=f"user_reset_{user_id_str}")
+        )
+        keyboard.add(types.InlineKeyboardButton("🔙 Back", callback_data="admin_edit_user"))
+        
+        bot.edit_message_text(
+            text,
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=keyboard,
+            parse_mode='HTML'
+        )
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        print(f"Error in edit user select: {e}")
+        bot.answer_callback_query(call.id, "❌ Error loading user data")
+
+@bot.callback_query_handler(func=lambda call: call.data and call.data.startswith("user_edit_"))
+def handle_user_edit_action(call):
+    """Handle user editing actions"""
+    try:
+        action_parts = call.data.split("_")
+        action = f"{action_parts[1]}_{action_parts[2]}"  # edit_name, edit_score, etc.
+        user_id_str = action_parts[3]
+        
+        participants = load_participants()
+        if user_id_str not in participants:
+            bot.answer_callback_query(call.id, "❌ User not found!")
+            return
+        
+        admin_state = get_admin_state(call.from_user.id)
+        admin_state["mode"] = "edit_user"
+        admin_state["data"] = {
+            "user_id": user_id_str,
+            "action": action
+        }
+        admin_state["last_activity"] = time.time()
+        
+        if action == "edit_name":
+            bot.edit_message_text(
+                f"✏️ <b>Edit Name for User {user_id_str}</b>\n\n"
+                f"Current name: {participants[user_id_str].get('name', 'Unknown')}\n\n"
+                "Send the new name:",
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode='HTML'
+            )
+        
+        elif action == "edit_score":
+            bot.edit_message_text(
+                f"⭐ <b>Edit Score for User {user_id_str}</b>\n\n"
+                f"Current score: {participants[user_id_str].get('total_score', 0)}\n\n"
+                "Send the new score (number):",
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode='HTML'
+            )
+        
+        elif action == "edit_accuracy":
+            bot.edit_message_text(
+                f"📊 <b>Edit Accuracy for User {user_id_str}</b>\n\n"
+                f"Current accuracy: {participants[user_id_str].get('accuracy', 0):.1f}%\n\n"
+                "Send the new accuracy (0-100):",
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode='HTML'
+            )
+        
+        elif action == "edit_quizzes":
+            bot.edit_message_text(
+                f"🎯 <b>Edit Quizzes Completed for User {user_id_str}</b>\n\n"
+                f"Current quizzes completed: {participants[user_id_str].get('quizzes_completed', 0)}\n\n"
+                "Send the new number of quizzes completed:",
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode='HTML'
+            )
+        
+        elif action == "toggle_completion":
+            # Toggle completion status immediately
+            participants[user_id_str]["has_completed_current_quiz"] = not participants[user_id_str].get("has_completed_current_quiz", False)
+            save_participants(participants)
+            
+            # Update quiz completion list
+            completion_data = load_quiz_completion()
+            if participants[user_id_str]["has_completed_current_quiz"]:
+                if user_id_str not in completion_data.get("completed_users", []):
+                    completion_data.setdefault("completed_users", []).append(user_id_str)
+            else:
+                if user_id_str in completion_data.get("completed_users", []):
+                    completion_data["completed_users"].remove(user_id_str)
+            save_quiz_completion(completion_data)
+            
+            status = "✅ Completed" if participants[user_id_str]["has_completed_current_quiz"] else "❌ Not Completed"
+            bot.answer_callback_query(call.id, f"✅ Completion status toggled to: {status}")
+            # Refresh the user edit view
+            handle_edit_user_select(call)
+            return
+        
+        elif action == "reset_user":
+            # Reset user data
+            participants[user_id_str] = {
+                "name": participants[user_id_str].get("name", f"User_{user_id_str}"),
+                "first_seen": participants[user_id_str].get("first_seen", datetime.now().strftime("%Y-%m-%dT%H:%M:%S")),
+                "chat_ids": participants[user_id_str].get("chat_ids", []),
+                "total_score": 0,
+                "quizzes_completed": 0,
+                "accuracy": 0,
+                "has_completed_current_quiz": False,
+                "last_seen": datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+            }
+            save_participants(participants)
+            
+            # Remove from completion list
+            completion_data = load_quiz_completion()
+            if user_id_str in completion_data.get("completed_users", []):
+                completion_data["completed_users"].remove(user_id_str)
+            save_quiz_completion(completion_data)
+            
+            bot.answer_callback_query(call.id, "✅ User data reset successfully!")
+            # Refresh the user edit view
+            handle_edit_user_select(call)
+            return
+        
+        bot.answer_callback_query(call.id)
+        
+    except Exception as e:
+        print(f"Error in user edit action: {e}")
+        bot.answer_callback_query(call.id, "❌ Error processing request")
 
 def show_questions_list(call):
     """Show list of all questions"""
@@ -1870,11 +2078,102 @@ def handle_all_messages(message):
         
         elif admin_state["mode"] == "set_time":
             handle_set_time(message, admin_state)
+        
+        elif admin_state["mode"] == "edit_user":
+            handle_edit_user_flow(message, admin_state)
             
     except Exception as e:
         print(f"Error handling admin message: {e}")
         msg = bot.send_message(message.chat.id, "❌ An error occurred processing your request.")
         schedule_auto_delete(message.chat.id, msg.message_id)
+
+def handle_edit_user_flow(message, admin_state):
+    """Handle user editing workflow"""
+    try:
+        action = admin_state["data"].get("action")
+        user_id_str = admin_state["data"].get("user_id")
+        
+        # Delete the user's input message
+        try:
+            bot.delete_message(message.chat.id, message.message_id)
+        except:
+            pass
+        
+        participants = load_participants()
+        if user_id_str not in participants:
+            msg = bot.send_message(message.chat.id, "❌ User not found!")
+            schedule_auto_delete(message.chat.id, msg.message_id)
+            clear_admin_state(message.from_user.id)
+            return
+        
+        if action == "edit_name":
+            new_name = message.text.strip()
+            participants[user_id_str]["name"] = new_name
+            save_participants(participants)
+            
+            msg = bot.send_message(
+                message.chat.id,
+                f"✅ <b>Name updated successfully!</b>\n\n"
+                f"User {user_id_str} is now named: <b>{new_name}</b>",
+                parse_mode='HTML'
+            )
+        
+        elif action == "edit_score":
+            try:
+                new_score = int(message.text)
+                participants[user_id_str]["total_score"] = new_score
+                save_participants(participants)
+                
+                msg = bot.send_message(
+                    message.chat.id,
+                    f"✅ <b>Score updated successfully!</b>\n\n"
+                    f"User {user_id_str} now has score: <b>{new_score}</b>",
+                    parse_mode='HTML'
+                )
+            except ValueError:
+                msg = bot.send_message(message.chat.id, "❌ Please enter a valid number for score.")
+        
+        elif action == "edit_accuracy":
+            try:
+                new_accuracy = float(message.text)
+                if 0 <= new_accuracy <= 100:
+                    participants[user_id_str]["accuracy"] = new_accuracy
+                    save_participants(participants)
+                    
+                    msg = bot.send_message(
+                        message.chat.id,
+                        f"✅ <b>Accuracy updated successfully!</b>\n\n"
+                        f"User {user_id_str} now has accuracy: <b>{new_accuracy:.1f}%</b>",
+                        parse_mode='HTML'
+                    )
+                else:
+                    msg = bot.send_message(message.chat.id, "❌ Please enter a number between 0 and 100.")
+            except ValueError:
+                msg = bot.send_message(message.chat.id, "❌ Please enter a valid number for accuracy.")
+        
+        elif action == "edit_quizzes":
+            try:
+                new_quizzes = int(message.text)
+                participants[user_id_str]["quizzes_completed"] = new_quizzes
+                save_participants(participants)
+                
+                msg = bot.send_message(
+                    message.chat.id,
+                    f"✅ <b>Quizzes completed updated successfully!</b>\n\n"
+                    f"User {user_id_str} now has: <b>{new_quizzes}</b> quizzes completed",
+                    parse_mode='HTML'
+                )
+            except ValueError:
+                msg = bot.send_message(message.chat.id, "❌ Please enter a valid number for quizzes completed.")
+        
+        schedule_auto_delete(message.chat.id, msg.message_id)
+        clear_admin_state(message.from_user.id)
+        
+    except Exception as e:
+        print(f"Error in edit user flow: {e}")
+        msg = bot.send_message(message.chat.id, "❌ Error updating user data")
+        schedule_auto_delete(message.chat.id, msg.message_id)
+        clear_admin_state(message.from_user.id)
 
 def handle_add_question_flow(message, admin_state):
     """Handle the add question workflow"""
@@ -2116,6 +2415,7 @@ if __name__ == "__main__":
     print("⚡ Instant mode: Questions advance when all participants answer")
     print("🗑️ Auto-delete: All messages vanish after 30s, start message after 5min")
     print("🔧 Enhanced state management with comprehensive clearing")
+    print("👤 User Editing: Full user data management in admin panel")
     
     # Ensure data files exist
     for file in [CONFIG["QUESTIONS_FILE"], CONFIG["PARTICIPANTS_FILE"], CONFIG["QUIZ_COMPLETION_FILE"]]:
