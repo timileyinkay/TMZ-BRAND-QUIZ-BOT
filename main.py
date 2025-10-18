@@ -12,6 +12,7 @@ from collections import defaultdict, namedtuple
 from dotenv import load_dotenv
 import telebot
 from telebot import types
+import random
 from datetime import datetime
 from flask import Flask
 
@@ -20,8 +21,24 @@ app = Flask(__name__)
 load_dotenv()
 
 # === BOT TOKEN ===
-TOKEN = os.getenv("BOT_TOKEN") or "8335451882:AAGy5lwKBby2Ue7tkktNMeLKfYYNwU8YHu4"
+TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
 bot = telebot.TeleBot(TOKEN)
+
+# Validate token early so we fail fast with a clear message instead of noisy 401 loops
+def validate_bot_token_or_exit():
+    try:
+        me = bot.get_me()
+        print(f"Bot token appears valid. Bot username: @{me.username}")
+    except Exception as e:
+        # TeleBot raises ApiTelegramException on 401; include guidance
+        print("ERROR: Bot token validation failed. Telegram API returned an error when calling getMe().")
+        print("This usually means the BOT_TOKEN is missing, invalid, or has been revoked.")
+        print("Please set the BOT_TOKEN environment variable correctly (or update the hard-coded token).")
+        print(f"Exception: {e}")
+        # Exit to avoid infinite retry loop and repeated 401 logs
+        raise SystemExit(1)
+
+validate_bot_token_or_exit()
 
 # === CONFIGURATION ===
 CONFIG = {
@@ -36,6 +53,12 @@ CONFIG = {
     "AUTO_DELETE_DELAY": 100,  # 1 minutes for most messages
     "START_MESSAGE_DELAY": 60  # ⚡ CHANGED: 1 minute for start message (was 480)
 }
+
+# Shuffling options
+CONFIG.setdefault("SHUFFLE_QUESTIONS", True)
+CONFIG.setdefault("SHUFFLE_OPTIONS", True)
+# Optional seed for reproducible shuffles (None for random)
+CONFIG.setdefault("SHUFFLE_SEED", None)
 
 # === MESSAGE AUTO-DELETION SYSTEM ===
 def schedule_auto_delete(chat_id, message_id, delay=None):
@@ -495,6 +518,7 @@ def make_admin_keyboard():
         types.InlineKeyboardButton("📥 Bulk Add Q&A", callback_data="admin_bulk_add"),
         types.InlineKeyboardButton("✏️ Edit Question", callback_data="admin_edit_question"),
         types.InlineKeyboardButton("🗑️ Delete Question", callback_data="admin_delete_question"),
+    types.InlineKeyboardButton("🔀 Shuffle Settings", callback_data="admin_shuffle_settings"),
         types.InlineKeyboardButton("📤 Bulk Delete Q&A", callback_data="admin_bulk_delete"),  # NEW
         types.InlineKeyboardButton("⏱️ Set Question Time", callback_data="admin_set_time"),
         types.InlineKeyboardButton("🔄 Reset Quiz", callback_data="admin_reset_quiz"),
@@ -910,6 +934,8 @@ def handle_admin_callback(call):
         start_bulk_add_questions(call)
     elif action == "admin_bulk_delete":
         start_bulk_delete_questions(call)
+    elif action == "admin_shuffle_settings":
+        show_shuffle_settings(call)
     elif action == "admin_set_time":
         set_question_time(call)
     elif action == "admin_reset_quiz":
@@ -927,6 +953,50 @@ def handle_admin_callback(call):
     elif action == "admin_close":
         bot.delete_message(call.message.chat.id, call.message.message_id)
         bot.answer_callback_query(call.id, "Admin panel closed")
+
+def show_shuffle_settings(call):
+    """Show shuffle toggles in admin UI"""
+    user_id = call.from_user.id
+    if not is_admin(user_id):
+        bot.answer_callback_query(call.id, "❌ Admin only!")
+        return
+
+    q_flag = CONFIG.get("SHUFFLE_QUESTIONS", True)
+    o_flag = CONFIG.get("SHUFFLE_OPTIONS", True)
+
+    text = "🔀 <b>Shuffle Settings</b>\n\n"
+    text += f"• Shuffle Questions: <b>{'✅ ON' if q_flag else '❌ OFF'}</b>\n"
+    text += f"• Shuffle Options: <b>{'✅ ON' if o_flag else '❌ OFF'}</b>\n\n"
+    text += "Toggle the settings below:"
+
+    keyboard = types.InlineKeyboardMarkup(row_width=2)
+    keyboard.add(types.InlineKeyboardButton(("✅ Disable" if q_flag else "✅ Enable") + " Questions", callback_data="toggle_shuffle_questions"),
+                 types.InlineKeyboardButton(("✅ Disable" if o_flag else "✅ Enable") + " Options", callback_data="toggle_shuffle_options"))
+    keyboard.add(types.InlineKeyboardButton("🔙 Back", callback_data="admin_stats"))
+
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=keyboard, parse_mode='HTML')
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda call: call.data in ["toggle_shuffle_questions", "toggle_shuffle_options"])
+def handle_toggle_shuffle(call):
+    try:
+        user_id = call.from_user.id
+        if not is_admin(user_id):
+            bot.answer_callback_query(call.id, "❌ Admin only!")
+            return
+
+        if call.data == "toggle_shuffle_questions":
+            CONFIG["SHUFFLE_QUESTIONS"] = not CONFIG.get("SHUFFLE_QUESTIONS", True)
+            bot.answer_callback_query(call.id, f"Shuffle Questions set to: {CONFIG['SHUFFLE_QUESTIONS']}")
+        else:
+            CONFIG["SHUFFLE_OPTIONS"] = not CONFIG.get("SHUFFLE_OPTIONS", True)
+            bot.answer_callback_query(call.id, f"Shuffle Options set to: {CONFIG['SHUFFLE_OPTIONS']}")
+
+        # Refresh the settings view
+        show_shuffle_settings(call)
+    except Exception as e:
+        print(f"Error toggling shuffle setting: {e}")
+        bot.answer_callback_query(call.id, "❌ Error toggling setting")
 
 def show_admin_stats(call):
     """Show comprehensive admin statistics"""
@@ -1805,8 +1875,38 @@ def handle_start_quiz(message):
             msg = bot.send_message(chat_id, "❌ No questions available. Contact admin.")
             schedule_auto_delete(chat_id, msg.message_id)
             return
-        
-        state.questions = questions
+
+        # Create an in-memory copy of questions and optionally shuffle using CONFIG flags
+        shuffled_questions = []
+        seed = CONFIG.get("SHUFFLE_SEED", None)
+        rnd = random.Random(seed) if seed is not None else random.Random()
+
+        # Determine question order
+        if CONFIG.get("SHUFFLE_QUESTIONS", True):
+            order = list(range(len(questions)))
+            rnd.shuffle(order)
+        else:
+            order = list(range(len(questions)))
+
+        for idx in order:
+            q = questions[idx]
+            opts = q.opts[:]  # copy
+
+            if CONFIG.get("SHUFFLE_OPTIONS", True):
+                indices = list(range(len(opts)))
+                rnd.shuffle(indices)
+            else:
+                indices = list(range(len(opts)))
+
+            new_opts = [opts[i] for i in indices]
+            try:
+                new_correct = indices.index(q.correct_index)
+            except Exception:
+                new_correct = 0
+
+            shuffled_questions.append(Question(q=q.q, opts=new_opts, correct_index=new_correct))
+
+        state.questions = shuffled_questions
         state.is_running = True
         state.current_q = -1
         state.participants.clear()

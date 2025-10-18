@@ -109,35 +109,48 @@ def set_quiz_active(status):
 # === SECURE QUESTION LOADING ===
 def load_questions():
     """Load questions securely"""
-    try:
-        if not os.path.exists(CONFIG["QUESTIONS_FILE"]):
-            # Create default questions file if it doesn't exist
-            default_questions = {
-                "questions": [],
-                "question_time": CONFIG["QUESTION_TIME"]
-            }
+    # Ensure the file exists with a valid structure, attempt to recover from malformed content
+    default_questions = {"questions": [], "question_time": CONFIG["QUESTION_TIME"]}
+    if not os.path.exists(CONFIG["QUESTIONS_FILE"]):
+        try:
             with open(CONFIG["QUESTIONS_FILE"], 'w', encoding='utf-8') as f:
                 json.dump(default_questions, f, indent=2, ensure_ascii=False)
-            return []
-        
+        except Exception as e:
+            print(f"Error creating default questions file: {e}")
+        return []
+
+    try:
         with open(CONFIG["QUESTIONS_FILE"], 'r', encoding='utf-8') as f:
             data = json.load(f)
-        
-        questions = []
-        for q_data in data.get("questions", []):
+    except Exception as e:
+        # Malformed or empty file -> recreate with defaults
+        print(f"Warning: questions file malformed or empty, recreating: {e}")
+        try:
+            with open(CONFIG["QUESTIONS_FILE"], 'w', encoding='utf-8') as f:
+                json.dump(default_questions, f, indent=2, ensure_ascii=False)
+        except Exception as ex:
+            print(f"Error rewriting questions file: {ex}")
+        return []
+
+    questions = []
+    for q_data in data.get("questions", []):
+        try:
             questions.append(Question(
                 q=q_data["question"],
                 opts=q_data["options"],
                 correct_index=q_data["correct_index"]
             ))
-        
-        if "question_time" in data:
-            CONFIG["QUESTION_TIME"] = data["question_time"]
-            
-        return questions
-    except Exception as e:
-        print(f"Error loading questions: {e}")
-        return []
+        except Exception:
+            # Skip malformed entries
+            continue
+
+    if "question_time" in data:
+        try:
+            CONFIG["QUESTION_TIME"] = int(data["question_time"])
+        except Exception:
+            pass
+
+    return questions
 
 def save_questions(questions, question_time=None):
     """Save questions to file"""
@@ -170,17 +183,25 @@ def is_admin(user_id):
 
 # === PARTICIPANT MANAGEMENT ===
 def load_participants():
-    try:
-        if not os.path.exists(CONFIG["PARTICIPANTS_FILE"]):
-            # Create default participants file if it doesn't exist
+    # Ensure the file exists and recover from malformed content
+    if not os.path.exists(CONFIG["PARTICIPANTS_FILE"]):
+        try:
             with open(CONFIG["PARTICIPANTS_FILE"], 'w', encoding='utf-8') as f:
                 json.dump({}, f, indent=2, ensure_ascii=False)
-            return {}
-        
+        except Exception as e:
+            print(f"Error creating participants file: {e}")
+        return {}
+
+    try:
         with open(CONFIG["PARTICIPANTS_FILE"], 'r', encoding='utf-8') as f:
             return json.load(f)
     except Exception as e:
-        print(f"Error loading participants: {e}")
+        print(f"Warning: participants file malformed or empty, recreating: {e}")
+        try:
+            with open(CONFIG["PARTICIPANTS_FILE"], 'w', encoding='utf-8') as f:
+                json.dump({}, f, indent=2, ensure_ascii=False)
+        except Exception as ex:
+            print(f"Error rewriting participants file: {ex}")
         return {}
 
 def save_participants(participants_data):
@@ -471,8 +492,10 @@ def make_admin_keyboard():
         types.InlineKeyboardButton("👤 Edit User Data", callback_data="admin_edit_user"),
         types.InlineKeyboardButton("❓ View Questions", callback_data="admin_questions"),
         types.InlineKeyboardButton("➕ Add Question", callback_data="admin_add_question"),
+        types.InlineKeyboardButton("📥 Bulk Add Q&A", callback_data="admin_bulk_add"),
         types.InlineKeyboardButton("✏️ Edit Question", callback_data="admin_edit_question"),
         types.InlineKeyboardButton("🗑️ Delete Question", callback_data="admin_delete_question"),
+        types.InlineKeyboardButton("📤 Bulk Delete Q&A", callback_data="admin_bulk_delete"),  # NEW
         types.InlineKeyboardButton("⏱️ Set Question Time", callback_data="admin_set_time"),
         types.InlineKeyboardButton("🔄 Reset Quiz", callback_data="admin_reset_quiz"),
         types.InlineKeyboardButton("🚪 Close Quiz", callback_data="admin_close_quiz"),
@@ -484,6 +507,7 @@ def make_admin_keyboard():
         types.InlineKeyboardButton("🔄 New Round", callback_data="admin_new_round")
     ]
     
+    # Add buttons in rows of 2
     for i in range(0, len(buttons), 2):
         if i + 1 < len(buttons):
             keyboard.add(buttons[i], buttons[i + 1])
@@ -882,6 +906,10 @@ def handle_admin_callback(call):
         start_edit_question(call)
     elif action == "admin_delete_question":
         start_delete_question(call)
+    elif action == "admin_bulk_add":
+        start_bulk_add_questions(call)
+    elif action == "admin_bulk_delete":
+        start_bulk_delete_questions(call)
     elif action == "admin_set_time":
         set_question_time(call)
     elif action == "admin_reset_quiz":
@@ -1298,6 +1326,280 @@ def start_delete_question(call):
         parse_mode='HTML'
     )
     bot.answer_callback_query(call.id)
+
+def start_bulk_add_questions(call):
+    """Start bulk question addition process (expects 5 options: A-E)"""
+    admin_state = get_admin_state(call.from_user.id)
+    admin_state["mode"] = "bulk_add_questions"
+    admin_state["data"] = {"step": "waiting_for_input"}
+    admin_state["last_activity"] = time.time()
+
+    instructions = (
+        "📥 <b>Bulk Add Q&A (5 options)</b>\n\n"
+        "Send questions using this format:\n\n"
+        "Question text line\n"
+        "A) Option 1\n"
+        "B) Option 2\n"
+        "C) Option 3\n"
+        "D) Option 4\n"
+        "E) Option 5\n"
+        "✅ C\n\n"
+        "Rules:\n"
+        "• Use ✅ followed by A/B/C/D/E to indicate the correct option\n"
+        "• Exactly 5 options per question\n"
+        "• Separate questions with a blank line\n"
+        "• Max 50 questions per bulk add\n\n"
+        "Send your bulk questions now:" )
+
+    bot.edit_message_text(
+        instructions,
+        call.message.chat.id,
+        call.message.message_id,
+        parse_mode='HTML'
+    )
+    bot.answer_callback_query(call.id)
+
+def start_bulk_delete_questions(call):
+    """Start bulk question deletion process"""
+    questions = load_questions()
+    if not questions:
+        bot.edit_message_text(
+            "❌ No questions available to delete.",
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=make_admin_keyboard(),
+            parse_mode='HTML'
+        )
+        bot.answer_callback_query(call.id)
+        return
+
+    keyboard = types.InlineKeyboardMarkup()
+    keyboard.add(types.InlineKeyboardButton("🗑️ Delete ALL Questions", callback_data="bulk_delete_all"))
+    keyboard.add(types.InlineKeyboardButton("📋 Select Questions to Delete", callback_data="bulk_delete_select"))
+    keyboard.add(types.InlineKeyboardButton("🔙 Back", callback_data="admin_questions"))
+
+    bot.edit_message_text(
+        f"🗑️ <b>Bulk Delete Q&A</b>\n\nTotal questions: {len(questions)}\n\nChoose deletion method:",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=keyboard,
+        parse_mode='HTML'
+    )
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda call: call.data in ["bulk_delete_all", "bulk_delete_select"])
+def handle_bulk_delete_options(call):
+    if call.data == "bulk_delete_all":
+        keyboard = types.InlineKeyboardMarkup()
+        keyboard.add(types.InlineKeyboardButton("✅ Confirm Delete ALL", callback_data="confirm_bulk_delete_all"))
+        keyboard.add(types.InlineKeyboardButton("❌ Cancel", callback_data="admin_bulk_delete"))
+
+        bot.edit_message_text(
+            "⚠️ <b>DELETE ALL QUESTIONS</b> ⚠️\n\nThis will permanently delete ALL questions! This action cannot be undone!\n\nAre you absolutely sure?",
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=keyboard,
+            parse_mode='HTML'
+        )
+
+    elif call.data == "bulk_delete_select":
+        show_question_selection_for_deletion(call)
+
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "confirm_bulk_delete_all")
+def handle_confirm_bulk_delete_all(call):
+    try:
+        if save_questions([]):
+            bot.edit_message_text("✅ <b>All questions deleted successfully!</b>", call.message.chat.id, call.message.message_id, parse_mode='HTML')
+        else:
+            bot.edit_message_text("❌ <b>Error deleting questions!</b>", call.message.chat.id, call.message.message_id, parse_mode='HTML')
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        print(f"Error in bulk delete all: {e}")
+        bot.answer_callback_query(call.id, "❌ Error deleting questions")
+
+def show_question_selection_for_deletion(call):
+    questions = load_questions()
+    if not questions:
+        bot.edit_message_text("❌ No questions available.", call.message.chat.id, call.message.message_id, reply_markup=make_admin_keyboard(), parse_mode='HTML')
+        return
+    admin_state = get_admin_state(call.from_user.id)
+    admin_state.setdefault("data", {})
+    sel = admin_state["data"].setdefault("selected_questions", set())
+
+    keyboard = types.InlineKeyboardMarkup()
+    for i, q in enumerate(questions):
+        short_q = q.q[:40] + ("..." if len(q.q) > 40 else "")
+        checked = "☑" if i in sel else "☐"
+        keyboard.add(types.InlineKeyboardButton(f"{checked} Q{i+1}: {short_q}", callback_data=f"toggle_delete_{i}"))
+
+    keyboard.add(types.InlineKeyboardButton("✅ Delete Selected", callback_data="delete_selected"))
+    keyboard.add(types.InlineKeyboardButton("🔙 Back", callback_data="admin_bulk_delete"))
+
+    text = f"🗑️ <b>Select Questions to Delete</b>\n\nClick questions to select/deselect them for deletion.\nSelected: {len(sel)}/{len(questions)}"
+    try:
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=keyboard, parse_mode='HTML')
+    except Exception as e:
+        # Ignore 'message is not modified' to avoid spam
+        err = str(e)
+        if 'message is not modified' in err.lower():
+            pass
+        else:
+            print(f"Error updating question selection UI: {e}")
+
+@bot.callback_query_handler(func=lambda call: call.data and call.data.startswith("toggle_delete_"))
+def handle_toggle_delete(call):
+    try:
+        idx = int(call.data.split("_")[2])
+        admin_state = get_admin_state(call.from_user.id)
+        admin_state.setdefault("data", {})
+        sel = admin_state["data"].setdefault("selected_questions", set())
+
+        if idx in sel:
+            sel.remove(idx)
+        else:
+            sel.add(idx)
+
+        admin_state["last_activity"] = time.time()
+        show_question_selection_for_deletion(call)
+        bot.answer_callback_query(call.id, f"Toggled Q{idx+1}")
+    except Exception as e:
+        print(f"Error toggling delete: {e}")
+        bot.answer_callback_query(call.id, "❌ Error")
+
+@bot.callback_query_handler(func=lambda call: call.data == "delete_selected")
+def handle_delete_selected(call):
+    try:
+        admin_state = get_admin_state(call.from_user.id)
+        selected = admin_state.get("data", {}).get("selected_questions", set())
+        if not selected:
+            bot.answer_callback_query(call.id, "❌ No questions selected!")
+            return
+
+        questions = load_questions()
+        for index in sorted(selected, reverse=True):
+            if 0 <= index < len(questions):
+                questions.pop(index)
+
+        if save_questions(questions):
+            admin_state["data"]["selected_questions"] = set()
+            bot.edit_message_text(f"✅ Deleted {len(selected)} questions. Remaining: {len(questions)}",
+                                  call.message.chat.id, call.message.message_id, parse_mode='HTML')
+        else:
+            bot.edit_message_text("❌ Error deleting questions!", call.message.chat.id, call.message.message_id, parse_mode='HTML')
+
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        print(f"Error deleting selected: {e}")
+        bot.answer_callback_query(call.id, "❌ Error deleting questions")
+
+def parse_bulk_questions(text):
+    """Parse bulk questions text into Question objects (supports A-E and ✅ X correct marker)"""
+    questions = []
+    lines = text.split('\n')
+    i = 0
+    n = len(lines)
+
+    while i < n:
+        line = lines[i].strip()
+        if not line:
+            i += 1
+            continue
+
+        # Assume this line is the question
+        q_text = line
+        options = []
+        correct_index = -1
+
+        # Read next lines for up to 6 lines (A-E and the ✅ line)
+        j = i + 1
+        while j < n and len(options) < 5:
+            l = lines[j].strip()
+            if not l:
+                j += 1
+                continue
+            if l.startswith('A)'):
+                options.append(l[2:].strip())
+            elif l.startswith('B)'):
+                options.append(l[2:].strip())
+            elif l.startswith('C)'):
+                options.append(l[2:].strip())
+            elif l.startswith('D)'):
+                options.append(l[2:].strip())
+            elif l.startswith('E)'):
+                options.append(l[2:].strip())
+            elif l.startswith('✅'):
+                val = l[1:].strip()
+                if val in ('A', 'B', 'C', 'D', 'E'):
+                    correct_index = ord(val) - 65
+            j += 1
+
+        # After reading options, look for a ✅ line if not found
+        if correct_index == -1:
+            # scan a bit further for a ✅ marker
+            k = j
+            while k < n:
+                l = lines[k].strip()
+                if not l:
+                    k += 1
+                    continue
+                if l.startswith('✅'):
+                    val = l[1:].strip()
+                    if val in ('A', 'B', 'C', 'D', 'E'):
+                        correct_index = ord(val) - 65
+                        j = k + 1
+                        break
+                break
+
+        # Validate
+        if len(options) == 5 and 0 <= correct_index < 5:
+            questions.append(Question(q=q_text, opts=options, correct_index=correct_index))
+            i = j
+        else:
+            # If parsing failed, skip this line and continue
+            i += 1
+
+    return questions
+
+
+def handle_bulk_questions_input(message, admin_state):
+    """Process pasted bulk questions from admin, parse and save them."""
+    try:
+        # Delete the admin message for cleanliness
+        try:
+            bot.delete_message(message.chat.id, message.message_id)
+        except:
+            pass
+
+        text = message.text or ""
+        parsed = parse_bulk_questions(text)
+        if not parsed:
+            msg = bot.send_message(message.chat.id, "❌ Failed to parse any questions. Please follow the format and try again.")
+            schedule_auto_delete(message.chat.id, msg.message_id)
+            clear_admin_state(message.from_user.id)
+            return
+
+        # Load existing and append (limit to 50 new questions)
+        questions = load_questions()
+        max_add = min(50, len(parsed))
+        added = 0
+        for q in parsed[:max_add]:
+            questions.append(q)
+            added += 1
+
+        if save_questions(questions):
+            msg = bot.send_message(message.chat.id, f"✅ Successfully added {added} questions. Total questions: {len(questions)}")
+        else:
+            msg = bot.send_message(message.chat.id, "❌ Error saving questions. Please try again.")
+
+        schedule_auto_delete(message.chat.id, msg.message_id)
+        clear_admin_state(message.from_user.id)
+    except Exception as e:
+        print(f"Error processing bulk questions: {e}")
+        msg = bot.send_message(message.chat.id, "❌ Error processing bulk questions.")
+        schedule_auto_delete(message.chat.id, msg.message_id)
+        clear_admin_state(message.from_user.id)
 
 def set_question_time(call):
     """Set question time"""
@@ -2076,6 +2378,10 @@ def handle_all_messages(message):
         elif admin_state["mode"] == "edit_question":
             handle_edit_question_flow(message, admin_state)
         
+        elif admin_state["mode"] == "bulk_add_questions":
+            # Handle bulk paste of multiple questions (A-E + ✅ <LETTER>)
+            handle_bulk_questions_input(message, admin_state)
+
         elif admin_state["mode"] == "set_time":
             handle_set_time(message, admin_state)
         
@@ -2205,8 +2511,8 @@ def handle_add_question_flow(message, admin_state):
             option_text = message.text
             admin_state["data"]["options"].append(option_text)
             admin_state["data"]["current_option"] += 1
-            
-            if admin_state["data"]["current_option"] < 4:
+            # Now expect 5 options (A-E)
+            if admin_state["data"]["current_option"] < 5:
                 option_letter = chr(65 + admin_state["data"]["current_option"])
                 msg = bot.send_message(
                     message.chat.id,
@@ -2216,9 +2522,9 @@ def handle_add_question_flow(message, admin_state):
                 schedule_auto_delete(message.chat.id, msg.message_id)
                 bot.register_next_step_handler(msg, handle_add_question_flow, admin_state)
             else:
-                # All options collected, now ask for correct answer
-                keyboard = types.InlineKeyboardMarkup(row_width=2)
-                for i in range(4):
+                # All options collected (5), now ask for correct answer
+                keyboard = types.InlineKeyboardMarkup(row_width=3)
+                for i in range(5):
                     keyboard.add(types.InlineKeyboardButton(
                         f"Option {chr(65+i)}: {admin_state['data']['options'][i]}", 
                         callback_data=f"add_correct_{i}"
@@ -2283,7 +2589,7 @@ def handle_edit_question_flow(message, admin_state):
             admin_state["data"]["current_options"][option_index] = message.text
             option_index += 1
             
-            if option_index < 4:
+            if option_index < 5:
                 admin_state["data"]["current_option_index"] = option_index
                 option_letter = chr(65 + option_index)
                 
