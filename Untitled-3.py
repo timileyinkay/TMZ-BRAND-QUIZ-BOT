@@ -2,6 +2,7 @@
 TMZ BRAND Quiz Bot - Final Leaderboard Only
 SECURE VERSION: One-time quiz participation with Admin Panel
 NANOSECOND PRECISION VERSION
+WITH DEVICE FINGERPRINTING
 """
 
 import os
@@ -12,16 +13,36 @@ from collections import defaultdict, namedtuple
 from dotenv import load_dotenv
 import telebot
 from telebot import types
+import random
 from datetime import datetime
 from flask import Flask
+import hashlib
+import platform
+import socket
 
 app = Flask(__name__)
 
 load_dotenv()
 
 # === BOT TOKEN ===
-TOKEN = os.getenv("BOT_TOKEN") or "8335451882:AAGy5lwKBby2Ue7tkktNMeLKfYYNwU8YHu4"
+TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
 bot = telebot.TeleBot(TOKEN)
+
+# Validate token early so we fail fast with a clear message instead of noisy 401 loops
+def validate_bot_token_or_exit():
+    try:
+        me = bot.get_me()
+        print(f"Bot token appears valid. Bot username: @{me.username}")
+    except Exception as e:
+        # TeleBot raises ApiTelegramException on 401; include guidance
+        print("ERROR: Bot token validation failed. Telegram API returned an error when calling getMe().")
+        print("This usually means the BOT_TOKEN is missing, invalid, or has been revoked.")
+        print("Please set the BOT_TOKEN environment variable correctly (or update the hard-coded token).")
+        print(f"Exception: {e}")
+        # Exit to avoid infinite retry loop and repeated 401 logs
+        raise SystemExit(1)
+
+validate_bot_token_or_exit()
 
 # === CONFIGURATION ===
 CONFIG = {
@@ -31,11 +52,124 @@ CONFIG = {
     "QUESTIONS_FILE": "questions.json",
     "PARTICIPANTS_FILE": "participants.json",
     "QUIZ_COMPLETION_FILE": "quiz_completed.json",
-    "ADMIN_IDS": [6011041717],  # Replace with your user ID
+    "DEVICE_FINGERPRINT_FILE": "device_fingerprints.json",
+    "ADMIN_IDS": [int(id.strip()) for id in os.getenv("ADMIN_IDS", "").split(",") if id.strip()],  # Replace with your user ID
     "QUESTION_TRANSITION_DELAY": 2,
     "AUTO_DELETE_DELAY": 100,  # 1 minutes for most messages
-    "START_MESSAGE_DELAY": 60  # ⚡ CHANGED: 1 minute for start message (was 480)
+    "START_MESSAGE_DELAY": 60,  # ⚡ CHANGED: 1 minute for start message (was 480)
+    "ALLOW_DEVICE_CHANGE": False  # Strict one device policy
 }
+
+# Shuffling options
+CONFIG.setdefault("SHUFFLE_QUESTIONS", True)
+CONFIG.setdefault("SHUFFLE_OPTIONS", True)
+# Optional seed for reproducible shuffles (None for random)
+CONFIG.setdefault("SHUFFLE_SEED", None)
+
+# === DEVICE FINGERPRINTING ===
+def generate_device_fingerprint(user_id):
+    """Generate a unique device fingerprint for the user"""
+    try:
+        # Get system information
+        system_info = {
+            "machine": platform.machine(),
+            "node": platform.node(),
+            "processor": platform.processor(),
+            "system": platform.system(),
+            "release": platform.release(),
+        }
+        
+        # Create a fingerprint string
+        fingerprint_data = f"{user_id}|{system_info['machine']}|{system_info['node']}|{system_info['system']}"
+        
+        # Hash it for privacy
+        fingerprint = hashlib.sha256(fingerprint_data.encode()).hexdigest()
+        return fingerprint
+    except Exception as e:
+        print(f"Error generating device fingerprint: {e}")
+        # Fallback: use a simpler fingerprint
+        return hashlib.sha256(f"{user_id}|fallback".encode()).hexdigest()
+
+def load_device_fingerprints():
+    """Load device fingerprint database"""
+    try:
+        if not os.path.exists(CONFIG["DEVICE_FINGERPRINT_FILE"]):
+            with open(CONFIG["DEVICE_FINGERPRINT_FILE"], 'w', encoding='utf-8') as f:
+                json.dump({}, f, indent=2, ensure_ascii=False)
+            return {}
+        
+        with open(CONFIG["DEVICE_FINGERPRINT_FILE"], 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Error loading device fingerprints: {e}")
+        return {}
+
+def save_device_fingerprints(fingerprints):
+    """Save device fingerprint database"""
+    try:
+        with open(CONFIG["DEVICE_FINGERPRINT_FILE"], 'w', encoding='utf-8') as f:
+            json.dump(fingerprints, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"Error saving device fingerprints: {e}")
+
+def register_user_device(user_id):
+    """Register a user's device fingerprint"""
+    fingerprints = load_device_fingerprints()
+    user_id_str = str(user_id)
+    
+    current_fingerprint = generate_device_fingerprint(user_id)
+    
+    # Check if user already has a registered device
+    if user_id_str in fingerprints:
+        stored_fingerprint = fingerprints[user_id_str].get("fingerprint")
+        if stored_fingerprint != current_fingerprint:
+            if not CONFIG["ALLOW_DEVICE_CHANGE"]:
+                return False, "device_mismatch"
+            else:
+                # Update to new device
+                fingerprints[user_id_str] = {
+                    "fingerprint": current_fingerprint,
+                    "registered_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                    "last_used": datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+                }
+                save_device_fingerprints(fingerprints)
+                return True, "device_updated"
+    
+    # Register new device
+    fingerprints[user_id_str] = {
+        "fingerprint": current_fingerprint,
+        "registered_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+        "last_used": datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    }
+    save_device_fingerprints(fingerprints)
+    return True, "device_registered"
+
+def verify_user_device(user_id):
+    """Verify if user is using their registered device"""
+    fingerprints = load_device_fingerprints()
+    user_id_str = str(user_id)
+    
+    if user_id_str not in fingerprints:
+        # User hasn't registered a device yet - allow first time access
+        return True
+    
+    current_fingerprint = generate_device_fingerprint(user_id)
+    stored_fingerprint = fingerprints[user_id_str].get("fingerprint")
+    
+    # Update last used timestamp
+    fingerprints[user_id_str]["last_used"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    save_device_fingerprints(fingerprints)
+    
+    return current_fingerprint == stored_fingerprint
+
+def get_user_device_info(user_id):
+    """Get user's device registration info"""
+    fingerprints = load_device_fingerprints()
+    user_id_str = str(user_id)
+    
+    if user_id_str in fingerprints:
+        return fingerprints[user_id_str]
+    return None
 
 # === MESSAGE AUTO-DELETION SYSTEM ===
 def schedule_auto_delete(chat_id, message_id, delay=None):
@@ -490,11 +624,14 @@ def make_admin_keyboard():
         types.InlineKeyboardButton("📊 View Statistics", callback_data="admin_stats"),
         types.InlineKeyboardButton("👥 View Participants", callback_data="admin_participants"),
         types.InlineKeyboardButton("👤 Edit User Data", callback_data="admin_edit_user"),
+        types.InlineKeyboardButton("📱 Device Management", callback_data="admin_devices"),
+        types.InlineKeyboardButton("🔄 Reset User Device", callback_data="admin_reset_device"),
         types.InlineKeyboardButton("❓ View Questions", callback_data="admin_questions"),
         types.InlineKeyboardButton("➕ Add Question", callback_data="admin_add_question"),
         types.InlineKeyboardButton("📥 Bulk Add Q&A", callback_data="admin_bulk_add"),
         types.InlineKeyboardButton("✏️ Edit Question", callback_data="admin_edit_question"),
         types.InlineKeyboardButton("🗑️ Delete Question", callback_data="admin_delete_question"),
+    types.InlineKeyboardButton("🔀 Shuffle Settings", callback_data="admin_shuffle_settings"),
         types.InlineKeyboardButton("📤 Bulk Delete Q&A", callback_data="admin_bulk_delete"),  # NEW
         types.InlineKeyboardButton("⏱️ Set Question Time", callback_data="admin_set_time"),
         types.InlineKeyboardButton("🔄 Reset Quiz", callback_data="admin_reset_quiz"),
@@ -561,27 +698,93 @@ def handle_start(message):
     
     # ⚠️ REMOVED the immediate deletion - let auto-delete handle it after 1 minute
     
+    # Device verification
+    if not verify_user_device(user_id):
+        device_info = get_user_device_info(user_id)
+        if device_info:
+            registered_date = datetime.fromisoformat(device_info["registered_at"]).strftime("%Y-%m-%d %H:%M")
+            
+        msg = bot.send_message(chat_id,
+            "❌ <b>ACCESS DENIED - DEVICE VERIFICATION FAILED</b>\n\n"
+            "You are attempting to access the quiz from an unauthorized device.\n\n"
+            f"• Your account was originally registered on: <b>{registered_date}</b>\n"
+            "• Each account is locked to one device only\n"
+            "• Sharing accounts across devices is prohibited\n\n"
+            "<i>If this is your primary device, contact admin for assistance.</i>",
+            parse_mode='HTML'
+        )
+        schedule_auto_delete(chat_id, msg.message_id)
+        return
+    
     participant_name = get_participant_name(user_id)
     
     if participant_name.startswith("User_"):
+        # Register device on first use
+        success, status = register_user_device(user_id)
+        
         msg = bot.send_message(chat_id,
             "👋 Welcome to TMZ BRAND QUIZ BOT! 🔥\n\n"
-            "Please enter your name to register:"
+            "📱 <b>Device Registered Successfully</b>\n"
+            "Your device has been linked to your account.\n\n"
+            "Please enter your name to register:",
+            parse_mode='HTML'
         )
-        # Auto-delete registration prompt after 1 minute
         schedule_auto_delete(chat_id, msg.message_id, CONFIG["START_MESSAGE_DELAY"])
         bot.register_next_step_handler(msg, process_name_step, user_id, chat_id)
     else:
         welcome_msg = bot.send_message(chat_id, 
             f"🔥 Welcome back, {participant_name}! 🔥\n\n"
+            "📱 <b>Device Verified</b>\n"
+            "Your device has been successfully verified.\n\n"
             "Use /start_quiz to begin the quiz.\n"
             "Use /leaderboard to view global rankings.\n"
-            "Use /myinfo to see your statistics.",
+            "Use /myinfo to see your statistics.\n"
+            "Use /mydevice to check your device status.",
             parse_mode='HTML'
         )
-        # Auto-delete welcome message after 1 minute
         schedule_auto_delete(chat_id, welcome_msg.message_id, CONFIG["START_MESSAGE_DELAY"])
         global_leaderboard = leaderboard_manager.show_global_leaderboard(chat_id)
+
+@bot.message_handler(commands=['mydevice'])
+def handle_mydevice(message):
+    """Show user's device information"""
+    try:
+        bot.delete_message(message.chat.id, message.message_id)
+    except:
+        pass
+    
+    user_id = message.from_user.id
+    device_info = get_user_device_info(user_id)
+    
+    if device_info:
+        registered_date = datetime.fromisoformat(device_info["registered_at"]).strftime("%Y-%m-%d %H:%M")
+        last_used = datetime.fromisoformat(device_info["last_used"]).strftime("%Y-%m-%d %H:%M")
+        is_current_device = verify_user_device(user_id)
+        
+        device_status = "✅ Verified" if is_current_device else "❌ Unauthorized"
+        
+        info_text = (
+            "📱 <b>Your Device Information</b>\n\n"
+            f"🔒 Status: <b>{device_status}</b>\n"
+            f"📅 Registered: <b>{registered_date}</b>\n"
+            f"🕒 Last Used: <b>{last_used}</b>\n\n"
+        )
+        
+        if not is_current_device:
+            info_text += (
+                "⚠️ <b>Warning:</b> You're not using your registered device.\n"
+                "You won't be able to participate in quizzes.\n\n"
+                "<i>Contact admin if you need to change your registered device.</i>"
+            )
+    else:
+        info_text = (
+            "📱 <b>Device Information</b>\n\n"
+            "❌ No device registered.\n"
+            "Please use /start to register your device."
+        )
+    
+    msg = bot.send_message(message.chat.id, info_text, parse_mode='HTML')
+    schedule_auto_delete(message.chat.id, msg.message_id)
 
 def process_name_step(message, user_id, chat_id):
     """Process the user's name and send welcome message"""
@@ -603,7 +806,8 @@ def process_name_step(message, user_id, chat_id):
             f"🔥 Welcome to TMZ BRAND Quiz, {name}! 🔥\n\n"
             "Use /start_quiz to begin the quiz.\n"
             "Use /leaderboard to view global rankings.\n"
-            "Use /myinfo to see your statistics.",
+            "Use /myinfo to see your statistics.\n"
+            "Use /mydevice to check your device status.",
             parse_mode='HTML'
         )
         
@@ -898,6 +1102,10 @@ def handle_admin_callback(call):
         show_participants_list(call)
     elif action == "admin_edit_user":
         handle_edit_user(call)
+    elif action == "admin_devices":
+        handle_admin_devices(call)
+    elif action == "admin_reset_device":
+        handle_admin_reset_device(call)
     elif action == "admin_questions":
         show_questions_list(call)
     elif action == "admin_add_question":
@@ -910,6 +1118,8 @@ def handle_admin_callback(call):
         start_bulk_add_questions(call)
     elif action == "admin_bulk_delete":
         start_bulk_delete_questions(call)
+    elif action == "admin_shuffle_settings":
+        show_shuffle_settings(call)
     elif action == "admin_set_time":
         set_question_time(call)
     elif action == "admin_reset_quiz":
@@ -928,11 +1138,111 @@ def handle_admin_callback(call):
         bot.delete_message(call.message.chat.id, call.message.message_id)
         bot.answer_callback_query(call.id, "Admin panel closed")
 
+@bot.callback_query_handler(func=lambda call: call.data == "admin_devices")
+def handle_admin_devices(call):
+    """Show device management statistics"""
+    user_id = call.from_user.id
+    if not is_admin(user_id):
+        bot.answer_callback_query(call.id, "❌ Admin only!")
+        return
+    
+    fingerprints = load_device_fingerprints()
+    
+    stats_text = "📱 <b>Device Management</b>\n\n"
+    stats_text += f"• Registered Devices: <b>{len(fingerprints)}</b>\n"
+    
+    # Count active devices (used in last 30 days)
+    thirty_days_ago = datetime.now().timestamp() - (30 * 24 * 60 * 60)
+    active_devices = 0
+    
+    for user_data in fingerprints.values():
+        last_used = datetime.fromisoformat(user_data["last_used"]).timestamp()
+        if last_used > thirty_days_ago:
+            active_devices += 1
+    
+    stats_text += f"• Active Devices (30 days): <b>{active_devices}</b>\n"
+    stats_text += f"• Device Change Allowed: <b>{'✅ YES' if CONFIG['ALLOW_DEVICE_CHANGE'] else '❌ NO'}</b>\n\n"
+    
+    bot.edit_message_text(
+        stats_text,
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=make_admin_keyboard(),
+        parse_mode='HTML'
+    )
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "admin_reset_device")
+def handle_admin_reset_device(call):
+    """Reset a user's device registration"""
+    user_id = call.from_user.id
+    if not is_admin(user_id):
+        bot.answer_callback_query(call.id, "❌ Admin only!")
+        return
+    
+    admin_state = get_admin_state(user_id)
+    admin_state["mode"] = "reset_device"
+    admin_state["last_activity"] = time.time()
+    
+    bot.edit_message_text(
+        "🔄 <b>Reset User Device</b>\n\n"
+        "Please send the User ID whose device you want to reset:",
+        call.message.chat.id,
+        call.message.message_id,
+        parse_mode='HTML'
+    )
+    bot.answer_callback_query(call.id)
+
+def show_shuffle_settings(call):
+    """Show shuffle toggles in admin UI"""
+    user_id = call.from_user.id
+    if not is_admin(user_id):
+        bot.answer_callback_query(call.id, "❌ Admin only!")
+        return
+
+    q_flag = CONFIG.get("SHUFFLE_QUESTIONS", True)
+    o_flag = CONFIG.get("SHUFFLE_OPTIONS", True)
+
+    text = "🔀 <b>Shuffle Settings</b>\n\n"
+    text += f"• Shuffle Questions: <b>{'✅ ON' if q_flag else '❌ OFF'}</b>\n"
+    text += f"• Shuffle Options: <b>{'✅ ON' if o_flag else '❌ OFF'}</b>\n\n"
+    text += "Toggle the settings below:"
+
+    keyboard = types.InlineKeyboardMarkup(row_width=2)
+    keyboard.add(types.InlineKeyboardButton(("✅ Disable" if q_flag else "✅ Enable") + " Questions", callback_data="toggle_shuffle_questions"),
+                 types.InlineKeyboardButton(("✅ Disable" if o_flag else "✅ Enable") + " Options", callback_data="toggle_shuffle_options"))
+    keyboard.add(types.InlineKeyboardButton("🔙 Back", callback_data="admin_stats"))
+
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=keyboard, parse_mode='HTML')
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda call: call.data in ["toggle_shuffle_questions", "toggle_shuffle_options"])
+def handle_toggle_shuffle(call):
+    try:
+        user_id = call.from_user.id
+        if not is_admin(user_id):
+            bot.answer_callback_query(call.id, "❌ Admin only!")
+            return
+
+        if call.data == "toggle_shuffle_questions":
+            CONFIG["SHUFFLE_QUESTIONS"] = not CONFIG.get("SHUFFLE_QUESTIONS", True)
+            bot.answer_callback_query(call.id, f"Shuffle Questions set to: {CONFIG['SHUFFLE_QUESTIONS']}")
+        else:
+            CONFIG["SHUFFLE_OPTIONS"] = not CONFIG.get("SHUFFLE_OPTIONS", True)
+            bot.answer_callback_query(call.id, f"Shuffle Options set to: {CONFIG['SHUFFLE_OPTIONS']}")
+
+        # Refresh the settings view
+        show_shuffle_settings(call)
+    except Exception as e:
+        print(f"Error toggling shuffle setting: {e}")
+        bot.answer_callback_query(call.id, "❌ Error toggling setting")
+
 def show_admin_stats(call):
     """Show comprehensive admin statistics"""
     completion_data = load_quiz_completion()
     participants = load_participants()
     questions = load_questions()
+    fingerprints = load_device_fingerprints()
     
     completed_count = len(completion_data.get("completed_users", []))
     total_participants = len(participants)
@@ -945,7 +1255,8 @@ def show_admin_stats(call):
     stats_text = f"📊 <b>Admin Statistics</b>\n\n"
     stats_text += f"🔄 Quiz Active: <b>{'✅ YES' if completion_data.get('quiz_active', True) else '❌ NO'}</b>\n"
     stats_text += f"❓ Questions: <b>{len(questions)}</b>\n"
-    stats_text += f"⏱ Question Time: <b>{CONFIG['QUESTION_TIME']}s</b>\n\n"
+    stats_text += f"⏱ Question Time: <b>{CONFIG['QUESTION_TIME']}s</b>\n"
+    stats_text += f"📱 Registered Devices: <b>{len(fingerprints)}</b>\n\n"
     
     stats_text += f"👥 <b>Participants:</b>\n"
     stats_text += f"   • Total Registered: <b>{total_participants}</b>\n"
@@ -1734,11 +2045,13 @@ def export_data(call):
     participants = load_participants()
     questions = load_questions()
     completion_data = load_quiz_completion()
+    fingerprints = load_device_fingerprints()
     
     export_text = f"📥 <b>Quiz Data Export</b>\n\n"
     export_text += f"📅 Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
     export_text += f"❓ Questions: {len(questions)}\n"
     export_text += f"👥 Participants: {len(participants)}\n"
+    export_text += f"📱 Registered Devices: {len(fingerprints)}\n"
     export_text += f"✅ Completed: {len(completion_data.get('completed_users', []))}\n\n"
     
     export_text += "<b>Top Participants:</b>\n"
@@ -1771,6 +2084,17 @@ def handle_start_quiz(message):
     
     user_id = message.from_user.id
     chat_id = message.chat.id
+    
+    # Device verification
+    if not verify_user_device(user_id):
+        msg = bot.send_message(chat_id,
+            "❌ <b>DEVICE VERIFICATION FAILED</b>\n\n"
+            "You cannot start the quiz from this device.\n"
+            "Please use your registered device or contact admin.",
+            parse_mode='HTML'
+        )
+        schedule_auto_delete(chat_id, msg.message_id)
+        return
     
     if has_user_completed_quiz(user_id):
         msg = bot.send_message(chat_id, 
@@ -1805,8 +2129,38 @@ def handle_start_quiz(message):
             msg = bot.send_message(chat_id, "❌ No questions available. Contact admin.")
             schedule_auto_delete(chat_id, msg.message_id)
             return
-        
-        state.questions = questions
+
+        # Create an in-memory copy of questions and optionally shuffle using CONFIG flags
+        shuffled_questions = []
+        seed = CONFIG.get("SHUFFLE_SEED", None)
+        rnd = random.Random(seed) if seed is not None else random.Random()
+
+        # Determine question order
+        if CONFIG.get("SHUFFLE_QUESTIONS", True):
+            order = list(range(len(questions)))
+            rnd.shuffle(order)
+        else:
+            order = list(range(len(questions)))
+
+        for idx in order:
+            q = questions[idx]
+            opts = q.opts[:]  # copy
+
+            if CONFIG.get("SHUFFLE_OPTIONS", True):
+                indices = list(range(len(opts)))
+                rnd.shuffle(indices)
+            else:
+                indices = list(range(len(opts)))
+
+            new_opts = [opts[i] for i in indices]
+            try:
+                new_correct = indices.index(q.correct_index)
+            except Exception:
+                new_correct = 0
+
+            shuffled_questions.append(Question(q=q.q, opts=new_opts, correct_index=new_correct))
+
+        state.questions = shuffled_questions
         state.is_running = True
         state.current_q = -1
         state.participants.clear()
@@ -1907,6 +2261,11 @@ def handle_answer(call):
         user_id = call.from_user.id
         chat_id = call.message.chat.id
         
+        # Device verification
+        if not verify_user_device(user_id):
+            bot.answer_callback_query(call.id, "❌ Device verification failed! Use your registered device.", show_alert=True)
+            return
+        
         if has_user_completed_quiz(user_id):
             bot.answer_callback_query(call.id, "❌ You already completed this quiz!", show_alert=True)
             return
@@ -1989,8 +2348,8 @@ def handle_answer(call):
                     stop_countdown(chat_id)
             else:
                 correct_letter = chr(65 + state.questions[q_idx].correct_index)
-                bot.answer_callback_query(call.id, f"❌ Wrong!")
-                feedback = f"❌ <b>WRONG!</b> {participant_name}"
+                bot.answer_callback_query(call.id, f"❌ Wrong! Correct answer was {correct_letter}")
+                feedback = f"❌ <b>WRONG!</b> {participant_name} - Correct answer was {correct_letter}"
 
             # Send feedback message
             feedback_msg = bot.send_message(chat_id, feedback, parse_mode='HTML')
@@ -2387,11 +2746,60 @@ def handle_all_messages(message):
         
         elif admin_state["mode"] == "edit_user":
             handle_edit_user_flow(message, admin_state)
+        
+        elif admin_state["mode"] == "reset_device":
+            handle_reset_user_device(message, admin_state)
             
     except Exception as e:
         print(f"Error handling admin message: {e}")
         msg = bot.send_message(message.chat.id, "❌ An error occurred processing your request.")
         schedule_auto_delete(message.chat.id, msg.message_id)
+
+def handle_reset_user_device(message, admin_state):
+    """Handle resetting a user's device"""
+    try:
+        # Delete the admin message
+        try:
+            bot.delete_message(message.chat.id, message.message_id)
+        except:
+            pass
+        
+        target_user_id = message.text.strip()
+        
+        # Validate user ID
+        if not target_user_id.isdigit():
+            msg = bot.send_message(message.chat.id, "❌ Please enter a valid numeric User ID.")
+            schedule_auto_delete(message.chat.id, msg.message_id)
+            clear_admin_state(message.from_user.id)
+            return
+        
+        fingerprints = load_device_fingerprints()
+        
+        if target_user_id in fingerprints:
+            del fingerprints[target_user_id]
+            save_device_fingerprints(fingerprints)
+            
+            msg = bot.send_message(
+                message.chat.id,
+                f"✅ <b>Device reset successful!</b>\n\n"
+                f"User {target_user_id} can now register a new device.",
+                parse_mode='HTML'
+            )
+        else:
+            msg = bot.send_message(
+                message.chat.id,
+                f"❌ User {target_user_id} doesn't have a registered device.",
+                parse_mode='HTML'
+            )
+        
+        schedule_auto_delete(message.chat.id, msg.message_id)
+        clear_admin_state(message.from_user.id)
+        
+    except Exception as e:
+        print(f"Error resetting user device: {e}")
+        msg = bot.send_message(message.chat.id, "❌ Error resetting device.")
+        schedule_auto_delete(message.chat.id, msg.message_id)
+        clear_admin_state(message.from_user.id)
 
 def handle_edit_user_flow(message, admin_state):
     """Handle user editing workflow"""
@@ -2719,12 +3127,13 @@ if __name__ == "__main__":
     print("🤖 TMZ BRAND Quiz Bot Started!")
     print("📊 Features: One-time quiz, Admin panel, Edit questions, Leaderboard")
     print("⚡ Instant mode: Questions advance when all participants answer")
+    print("📱 DEVICE FINGERPRINTING: One device per user enforced")
     print("🗑️ Auto-delete: All messages vanish after 30s, start message after 5min")
     print("🔧 Enhanced state management with comprehensive clearing")
     print("👤 User Editing: Full user data management in admin panel")
     
     # Ensure data files exist
-    for file in [CONFIG["QUESTIONS_FILE"], CONFIG["PARTICIPANTS_FILE"], CONFIG["QUIZ_COMPLETION_FILE"]]:
+    for file in [CONFIG["QUESTIONS_FILE"], CONFIG["PARTICIPANTS_FILE"], CONFIG["QUIZ_COMPLETION_FILE"], CONFIG["DEVICE_FINGERPRINT_FILE"]]:
         try:
             with open(file, 'a+', encoding='utf-8') as f:
                 pass

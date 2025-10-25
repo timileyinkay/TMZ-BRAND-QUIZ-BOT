@@ -2,13 +2,16 @@
 TMZ BRAND Quiz Bot - Final Leaderboard Only
 SECURE VERSION: One-time quiz participation with Admin Panel
 NANOSECOND PRECISION VERSION
-WITH DEVICE FINGERPRINTING
+WITH ENHANCED DEVICE FINGERPRINTING - STRICT ONE DEVICE POLICY
 """
 
 import os
 import time
 import threading
 import json
+import uuid
+import hashlib
+import subprocess
 from collections import defaultdict, namedtuple
 from dotenv import load_dotenv
 import telebot
@@ -16,7 +19,6 @@ from telebot import types
 import random
 from datetime import datetime
 from flask import Flask
-import hashlib
 import platform
 import socket
 
@@ -46,7 +48,7 @@ validate_bot_token_or_exit()
 
 # === CONFIGURATION ===
 CONFIG = {
-    "QUESTION_TIME": 15,
+    "QUESTION_TIME": 12,  # REDUCED FROM 15 TO 12 SECONDS
     "POINTS_CORRECT": 10,
     "POINTS_FIRST_CORRECT_BONUS": 5,
     "QUESTIONS_FILE": "questions.json",
@@ -57,7 +59,7 @@ CONFIG = {
     "QUESTION_TRANSITION_DELAY": 2,
     "AUTO_DELETE_DELAY": 100,  # 1 minutes for most messages
     "START_MESSAGE_DELAY": 60,  # ⚡ CHANGED: 1 minute for start message (was 480)
-    "ALLOW_DEVICE_CHANGE": False  # Strict one device policy
+    "ALLOW_DEVICE_CHANGE": False  # Strict one device policy - NO CHANGES ALLOWED
 }
 
 # Shuffling options
@@ -66,36 +68,41 @@ CONFIG.setdefault("SHUFFLE_OPTIONS", True)
 # Optional seed for reproducible shuffles (None for random)
 CONFIG.setdefault("SHUFFLE_SEED", None)
 
-# === DEVICE FINGERPRINTING ===
-def generate_device_fingerprint(user_id):
-    """Generate a unique device fingerprint for the user"""
+# === ENHANCED DEVICE FINGERPRINTING ===
+def get_device_id():
+    """Get a persistent device identifier that's the same for all users on this device"""
     try:
-        # Get system information
-        system_info = {
-            "machine": platform.machine(),
-            "node": platform.node(),
-            "processor": platform.processor(),
-            "system": platform.system(),
-            "release": platform.release(),
-        }
+        device_id_file = "device_id.txt"
+        if os.path.exists(device_id_file):
+            with open(device_id_file, 'r') as f:
+                existing_id = f.read().strip()
+                if existing_id:
+                    return existing_id
         
-        # Create a fingerprint string
-        fingerprint_data = f"{user_id}|{system_info['machine']}|{system_info['node']}|{system_info['system']}"
-        
-        # Hash it for privacy
+        # Generate new device ID
+        new_id = str(uuid.uuid4())
+        with open(device_id_file, 'w') as f:
+            f.write(new_id)
+        return new_id
+    except Exception as e:
+        print(f"Error getting device ID: {e}")
+        return f"fallback_{uuid.uuid4()}"
+
+def generate_device_fingerprint():
+    """Generate a device fingerprint that's the same for all users on this device"""
+    try:
+        device_id = get_device_id()
+        # Device-specific fingerprint (no user ID in the mix)
+        fingerprint_data = f"{device_id}"
         fingerprint = hashlib.sha256(fingerprint_data.encode()).hexdigest()
         return fingerprint
     except Exception as e:
         print(f"Error generating device fingerprint: {e}")
-        # Fallback: use a simpler fingerprint
-        return hashlib.sha256(f"{user_id}|fallback".encode()).hexdigest()
-
+        return hashlib.sha256(f"device_fallback".encode()).hexdigest()
 def load_device_fingerprints():
-    """Load device fingerprint database"""
+    """Load device fingerprints from file"""
     try:
         if not os.path.exists(CONFIG["DEVICE_FINGERPRINT_FILE"]):
-            with open(CONFIG["DEVICE_FINGERPRINT_FILE"], 'w', encoding='utf-8') as f:
-                json.dump({}, f, indent=2, ensure_ascii=False)
             return {}
         
         with open(CONFIG["DEVICE_FINGERPRINT_FILE"], 'r', encoding='utf-8') as f:
@@ -103,64 +110,91 @@ def load_device_fingerprints():
     except Exception as e:
         print(f"Error loading device fingerprints: {e}")
         return {}
-
+    
 def save_device_fingerprints(fingerprints):
-    """Save device fingerprint database"""
+    """Save device fingerprints to file"""
     try:
         with open(CONFIG["DEVICE_FINGERPRINT_FILE"], 'w', encoding='utf-8') as f:
             json.dump(fingerprints, f, indent=2, ensure_ascii=False)
+        return True
     except Exception as e:
         print(f"Error saving device fingerprints: {e}")
+        return False
 
-def register_user_device(user_id):
-    """Register a user's device fingerprint"""
+def verify_user_device_simple(user_id):
+    """Simple device verification for answer handling"""
+    return verify_user_device_strict(user_id)
+
+def register_user_device_strict(user_id):
+    """Strict device registration - one device can only have ONE user"""
     fingerprints = load_device_fingerprints()
     user_id_str = str(user_id)
     
-    current_fingerprint = generate_device_fingerprint(user_id)
+    current_fingerprint = generate_device_fingerprint()  # Use device-specific fingerprint
     
-    # Check if user already has a registered device
+    # Check if this device is already used by another user
+    for existing_user_id, data in fingerprints.items():
+        if data.get("fingerprint") == current_fingerprint and existing_user_id != user_id_str:
+            return False, "device_already_used"
+    
+    # Check if this user already has a device registered
     if user_id_str in fingerprints:
         stored_fingerprint = fingerprints[user_id_str].get("fingerprint")
-        if stored_fingerprint != current_fingerprint:
-            if not CONFIG["ALLOW_DEVICE_CHANGE"]:
-                return False, "device_mismatch"
-            else:
-                # Update to new device
-                fingerprints[user_id_str] = {
-                    "fingerprint": current_fingerprint,
-                    "registered_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
-                    "last_used": datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-                }
-                save_device_fingerprints(fingerprints)
-                return True, "device_updated"
+        if stored_fingerprint == current_fingerprint:
+            # Same device - update timestamp
+            fingerprints[user_id_str]["last_used"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+            save_device_fingerprints(fingerprints)
+            return True, "device_verified"
+        else:
+            # User trying to use different device - BLOCK!
+            return False, "different_device"
     
-    # Register new device
+    # Register new device for this user
     fingerprints[user_id_str] = {
         "fingerprint": current_fingerprint,
         "registered_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
-        "last_used": datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        "last_used": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+        "device_id": get_device_id()  # Use the shared device ID
     }
     save_device_fingerprints(fingerprints)
     return True, "device_registered"
 
-def verify_user_device(user_id):
-    """Verify if user is using their registered device"""
+def verify_user_device_strict(user_id):
+    """Strict device verification"""
     fingerprints = load_device_fingerprints()
     user_id_str = str(user_id)
     
     if user_id_str not in fingerprints:
-        # User hasn't registered a device yet - allow first time access
-        return True
+        return False
     
-    current_fingerprint = generate_device_fingerprint(user_id)
+    current_fingerprint = generate_device_fingerprint()  # Use device-specific fingerprint
     stored_fingerprint = fingerprints[user_id_str].get("fingerprint")
     
-    # Update last used timestamp
+    # Update last used
     fingerprints[user_id_str]["last_used"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
     save_device_fingerprints(fingerprints)
     
     return current_fingerprint == stored_fingerprint
+
+def save_device_fingerprints(fingerprints):
+    """Save device fingerprints to file"""
+    try:
+        with open(CONFIG["DEVICE_FINGERPRINT_FILE"], 'w', encoding='utf-8') as f:
+            json.dump(fingerprints, f, indent=2, ensure_ascii=False)
+        return True
+    except Exception as e:
+        print(f"Error saving device fingerprints: {e}")
+        return False
+
+def cleanup_shared_device_id():
+    """Clean up the old shared device ID file"""
+    try:
+        shared_device_file = "device_id.txt"
+        if os.path.exists(shared_device_file):
+            os.remove(shared_device_file)
+            print("✅ Cleaned up shared device ID file")
+    except Exception as e:
+        print(f"Error cleaning up shared device ID: {e}")
 
 def get_user_device_info(user_id):
     """Get user's device registration info"""
@@ -696,58 +730,107 @@ def handle_start(message):
     user_id = message.from_user.id
     chat_id = message.chat.id
     
-    # ⚠️ REMOVED the immediate deletion - let auto-delete handle it after 1 minute
+    # STRICT Device verification - one device, one user only
+    success, status = register_user_device_strict(user_id)
     
-    # Device verification
-    if not verify_user_device(user_id):
-        device_info = get_user_device_info(user_id)
-        if device_info:
-            registered_date = datetime.fromisoformat(device_info["registered_at"]).strftime("%Y-%m-%d %H:%M")
-            
-        msg = bot.send_message(chat_id,
-            "❌ <b>ACCESS DENIED - DEVICE VERIFICATION FAILED</b>\n\n"
-            "You are attempting to access the quiz from an unauthorized device.\n\n"
-            f"• Your account was originally registered on: <b>{registered_date}</b>\n"
-            "• Each account is locked to one device only\n"
-            "• Sharing accounts across devices is prohibited\n\n"
-            "<i>If this is your primary device, contact admin for assistance.</i>",
-            parse_mode='HTML'
-        )
+    if not success:
+        if status == "device_already_used":
+            msg = bot.send_message(chat_id,
+                "🚫 <b>ACCESS DENIED</b>\n\n"
+                "📱 <b>This device has already been used to play!</b>\n\n"
+                "❌ <b>Anti-Cheat Policy:</b>\n"
+                "• One device = One player only\n"
+                "• Multiple accounts on same device are blocked\n\n"
+                "You cannot create multiple accounts on the same phone.",
+                parse_mode='HTML'
+            )
+        elif status == "different_device":
+            msg = bot.send_message(chat_id,
+                "🚫 <b>ACCESS DENIED</b>\n\n"
+                "You are trying to access from a different device than your original registration.\n\n"
+                "Please use your original device.",
+                parse_mode='HTML'
+            )
+        else:
+            msg = bot.send_message(chat_id,
+                "❌ <b>DEVICE VERIFICATION FAILED</b>\n\n"
+                "Please try again or contact admin.",
+                parse_mode='HTML'
+            )
+        
         schedule_auto_delete(chat_id, msg.message_id)
         return
     
+    # Continue with normal registration flow...
     participant_name = get_participant_name(user_id)
     
     if participant_name.startswith("User_"):
-        # Register device on first use
-        success, status = register_user_device(user_id)
-        
+        # First time user
         msg = bot.send_message(chat_id,
             "👋 Welcome to TMZ BRAND QUIZ BOT! 🔥\n\n"
-            "📱 <b>Device Registered Successfully</b>\n"
-            "Your device has been linked to your account.\n\n"
-            "Please enter your name to register:",
+            "📱 <b>Device Registered</b>\n"
+            "Your device has been successfully registered.\n\n"
+            "Please enter your name:",
             parse_mode='HTML'
         )
         schedule_auto_delete(chat_id, msg.message_id, CONFIG["START_MESSAGE_DELAY"])
         bot.register_next_step_handler(msg, process_name_step, user_id, chat_id)
     else:
+        # Returning user
         welcome_msg = bot.send_message(chat_id, 
             f"🔥 Welcome back, {participant_name}! 🔥\n\n"
             "📱 <b>Device Verified</b>\n"
             "Your device has been successfully verified.\n\n"
-            "Use /start_quiz to begin the quiz.\n"
-            "Use /leaderboard to view global rankings.\n"
-            "Use /myinfo to see your statistics.\n"
-            "Use /mydevice to check your device status.",
+            "Use /start_quiz to begin the quiz.",
             parse_mode='HTML'
         )
         schedule_auto_delete(chat_id, welcome_msg.message_id, CONFIG["START_MESSAGE_DELAY"])
-        global_leaderboard = leaderboard_manager.show_global_leaderboard(chat_id)
+        leaderboard_manager.show_global_leaderboard(chat_id)
+        
+def process_name_step(message, user_id, chat_id):
+    """Process user's name input during registration"""
+    try:
+        # Delete the user's name message
+        try:
+            bot.delete_message(chat_id, message.message_id)
+        except:
+            pass
+            
+        name = message.text.strip()
+        if not name or len(name) < 2:
+            msg = bot.send_message(chat_id, "❌ Please enter a valid name (at least 2 characters).")
+            schedule_auto_delete(chat_id, msg.message_id)
+            bot.register_next_step_handler(msg, process_name_step, user_id, chat_id)
+            return
+        
+        # Save participant info
+        save_participant_info(user_id, name, chat_id)
+        
+        welcome_msg = bot.send_message(
+            chat_id,
+            f"✅ <b>Registration Complete!</b>\n\n"
+            f"Welcome, {name}! 🎉\n\n"
+            "You can now:\n"
+            "• Use /start_quiz to begin the quiz\n"
+            "• Use /leaderboard to view rankings\n"
+            "• Use /myinfo to see your statistics\n"
+            "• Use /mydevice to check device status",
+            parse_mode='HTML'
+        )
+        schedule_auto_delete(chat_id, welcome_msg.message_id, CONFIG["START_MESSAGE_DELAY"])
+        
+        # Show global leaderboard
+        leaderboard_manager.show_global_leaderboard(chat_id)
+        
+    except Exception as e:
+        print(f"Error in process_name_step: {e}")
+        msg = bot.send_message(chat_id, "❌ Error processing your name. Please try /start again.")
+        schedule_auto_delete(chat_id, msg.message_id)
 
 @bot.message_handler(commands=['mydevice'])
 def handle_mydevice(message):
     """Show user's device information"""
+    # Delete the command message
     try:
         bot.delete_message(message.chat.id, message.message_id)
     except:
@@ -757,71 +840,24 @@ def handle_mydevice(message):
     device_info = get_user_device_info(user_id)
     
     if device_info:
-        registered_date = datetime.fromisoformat(device_info["registered_at"]).strftime("%Y-%m-%d %H:%M")
-        last_used = datetime.fromisoformat(device_info["last_used"]).strftime("%Y-%m-%d %H:%M")
-        is_current_device = verify_user_device(user_id)
-        
-        device_status = "✅ Verified" if is_current_device else "❌ Unauthorized"
-        
-        info_text = (
+        device_text = (
             "📱 <b>Your Device Information</b>\n\n"
-            f"🔒 Status: <b>{device_status}</b>\n"
-            f"📅 Registered: <b>{registered_date}</b>\n"
-            f"🕒 Last Used: <b>{last_used}</b>\n\n"
+            f"🆔 Device ID: <code>{device_info.get('device_id', 'Unknown')}</code>\n"
+            f"📅 Registered: {device_info.get('registered_at', 'Unknown')}\n"
+            f"🕒 Last Used: {device_info.get('last_used', 'Unknown')}\n\n"
+            "✅ <b>Device Status: VERIFIED</b>\n"
+            "Your device is properly registered and verified."
         )
-        
-        if not is_current_device:
-            info_text += (
-                "⚠️ <b>Warning:</b> You're not using your registered device.\n"
-                "You won't be able to participate in quizzes.\n\n"
-                "<i>Contact admin if you need to change your registered device.</i>"
-            )
     else:
-        info_text = (
-            "📱 <b>Device Information</b>\n\n"
-            "❌ No device registered.\n"
+        device_text = (
+            "📱 <b>Your Device Information</b>\n\n"
+            "❌ <b>No device registered!</b>\n\n"
             "Please use /start to register your device."
         )
     
-    msg = bot.send_message(message.chat.id, info_text, parse_mode='HTML')
+    msg = bot.send_message(message.chat.id, device_text, parse_mode='HTML')
     schedule_auto_delete(message.chat.id, msg.message_id)
 
-def process_name_step(message, user_id, chat_id):
-    """Process the user's name and send welcome message"""
-    try:
-        name = message.text.strip()
-        
-        # Delete the user's name message for privacy
-        try:
-            bot.delete_message(chat_id, message.message_id)
-        except:
-            pass
-        
-        # Save participant info
-        save_participant_info(user_id, name, chat_id)
-        
-        # Send welcome message with commands
-        welcome_msg = bot.send_message(
-            chat_id, 
-            f"🔥 Welcome to TMZ BRAND Quiz, {name}! 🔥\n\n"
-            "Use /start_quiz to begin the quiz.\n"
-            "Use /leaderboard to view global rankings.\n"
-            "Use /myinfo to see your statistics.\n"
-            "Use /mydevice to check your device status.",
-            parse_mode='HTML'
-        )
-        
-        # Auto-delete welcome message after the configured delay
-        schedule_auto_delete(chat_id, welcome_msg.message_id, CONFIG["START_MESSAGE_DELAY"])
-        
-        # Show global leaderboard
-        leaderboard_manager.show_global_leaderboard(chat_id)
-        
-    except Exception as e:
-        print(f"Error processing name: {e}")
-        error_msg = bot.send_message(chat_id, "❌ Error processing your name. Please try /start again.")
-        schedule_auto_delete(chat_id, error_msg.message_id)
-        
 @bot.message_handler(commands=['leaderboard', 'reload', 'rankings'])
 def handle_leaderboard(message):
     """Show global leaderboard"""
@@ -943,6 +979,45 @@ def handle_state_info(message):
     
     msg = bot.send_message(chat_id, state_info, parse_mode='HTML')
     schedule_auto_delete(message.chat.id, msg.message_id)
+
+@bot.message_handler(commands=['reset_all_devices'])
+def handle_reset_all_devices(message):
+    """Admin command to reset all device fingerprints (use with caution)"""
+    user_id = message.from_user.id
+    if not is_admin(user_id):
+        msg = bot.send_message(message.chat.id, "❌ Admin only command.")
+        schedule_auto_delete(message.chat.id, msg.message_id)
+        return
+    
+    # Delete the command message
+    try:
+        bot.delete_message(message.chat.id, message.message_id)
+    except:
+        pass
+    
+    try:
+        # Reset device fingerprints
+        fingerprints = {}
+        with open(CONFIG["DEVICE_FINGERPRINT_FILE"], 'w', encoding='utf-8') as f:
+            json.dump(fingerprints, f, indent=2, ensure_ascii=False)
+        
+        # Clean up all device ID files
+        for file in os.listdir('.'):
+            if file.startswith('device_id_') and file.endswith('.txt'):
+                os.remove(file)
+        
+        msg = bot.send_message(
+            message.chat.id,
+            "✅ All device fingerprints have been reset!\n\n"
+            "All users will need to register their devices again.",
+            parse_mode='HTML'
+        )
+        schedule_auto_delete(message.chat.id, msg.message_id)
+        
+    except Exception as e:
+        print(f"Error resetting devices: {e}")
+        msg = bot.send_message(message.chat.id, "❌ Error resetting devices.")
+        schedule_auto_delete(message.chat.id, msg.message_id)
 
 @bot.message_handler(commands=['reset_all_data'])
 def handle_reset_all_data(message):
@@ -1162,6 +1237,22 @@ def handle_admin_devices(call):
     
     stats_text += f"• Active Devices (30 days): <b>{active_devices}</b>\n"
     stats_text += f"• Device Change Allowed: <b>{'✅ YES' if CONFIG['ALLOW_DEVICE_CHANGE'] else '❌ NO'}</b>\n\n"
+    
+    # Show device sharing detection
+    device_sharing_count = 0
+    device_users_map = {}
+    
+    for uid, data in fingerprints.items():
+        fingerprint = data.get("fingerprint")
+        if fingerprint not in device_users_map:
+            device_users_map[fingerprint] = []
+        device_users_map[fingerprint].append(uid)
+    
+    for fingerprint, users in device_users_map.items():
+        if len(users) > 1:
+            device_sharing_count += 1
+    
+    stats_text += f"• Devices with Multiple Users: <b>{device_sharing_count}</b>\n"
     
     bot.edit_message_text(
         stats_text,
@@ -2073,10 +2164,169 @@ def export_data(call):
     )
     bot.answer_callback_query(call.id)
 
+#=== DEBUG DEVICE ===
+@bot.message_handler(commands=['debug_device'])
+def handle_debug_device(message):
+    """Debug device fingerprinting"""
+    user_id = message.from_user.id
+    
+    try:
+        bot.delete_message(message.chat.id, message.message_id)
+    except:
+        pass
+    
+    device_info = get_user_device_info(user_id)
+    
+    # Test both old and new fingerprint methods
+    old_fp = generate_user_device_fingerprint(user_id)  # User-specific (old)
+    new_fp = generate_device_fingerprint()              # Device-specific (new)
+    
+    debug_text = "🔧 <b>Device Debug Info</b>\n\n"
+    debug_text += f"User ID: <code>{user_id}</code>\n\n"
+    
+    debug_text += f"<b>Old Method (User-Specific):</b>\n"
+    debug_text += f"Fingerprint: <code>{old_fp[:20]}...</code>\n\n"
+    
+    debug_text += f"<b>New Method (Device-Specific):</b>\n"
+    debug_text += f"Fingerprint: <code>{new_fp[:20]}...</code>\n\n"
+    
+    if device_info:
+        stored_fp = device_info.get("fingerprint", "None")
+        debug_text += f"<b>Stored Fingerprint:</b>\n"
+        debug_text += f"<code>{stored_fp[:20]}...</code>\n\n"
+        
+        debug_text += f"<b>Matches:</b>\n"
+        debug_text += f"• Old Method: <b>{'✅ YES' if old_fp == stored_fp else '❌ NO'}</b>\n"
+        debug_text += f"• New Method: <b>{'✅ YES' if new_fp == stored_fp else '❌ NO'}</b>\n\n"
+        
+        debug_text += f"<b>Device Info:</b>\n"
+        debug_text += f"• Device ID: <code>{device_info.get('device_id', 'Unknown')}</code>\n"
+        debug_text += f"• Registered: {device_info.get('registered_at', 'Unknown')}\n"
+        debug_text += f"• Last Used: {device_info.get('last_used', 'Unknown')}\n"
+        
+        # Check if this device is used by other users
+        fingerprints = load_device_fingerprints()
+        device_users = []
+        for uid, data in fingerprints.items():
+            if data.get("fingerprint") == stored_fp and str(uid) != str(user_id):
+                device_users.append(uid)
+        
+        if device_users:
+            debug_text += f"\n⚠️ <b>Device Sharing Detected:</b>\n"
+            debug_text += f"This device is also used by: {', '.join(device_users)}\n"
+        else:
+            debug_text += f"\n✅ <b>Device Status:</b> This device is only used by you\n"
+            
+    else:
+        debug_text += "❌ No device registered\n"
+    
+    msg = bot.send_message(message.chat.id, debug_text, parse_mode='HTML')
+    schedule_auto_delete(message.chat.id, msg.message_id)
+
+def migrate_device_system():
+    """Migrate from user-specific to device-specific fingerprinting"""
+    try:
+        fingerprints = load_device_fingerprints()
+        print(f"Found {len(fingerprints)} registered devices")
+        
+        # Create a shared device ID file if it doesn't exist
+        shared_device_id = get_device_id()
+        print(f"Shared device ID: {shared_device_id}")
+        
+        # Group users by their old device IDs to detect sharing
+        device_users_map = {}
+        for user_id_str, data in fingerprints.items():
+            old_device_id = data.get("device_id")
+            if old_device_id not in device_users_map:
+                device_users_map[old_device_id] = []
+            device_users_map[old_device_id].append(user_id_str)
+        
+        # Handle devices with multiple users
+        for device_id, users in device_users_map.items():
+            if len(users) > 1:
+                print(f"⚠️ Device {device_id} has {len(users)} users: {users}")
+                # Keep the first user, remove others
+                keep_user = users[0]
+                remove_users = users[1:]
+                
+                for user_id in remove_users:
+                    if user_id in fingerprints:
+                        del fingerprints[user_id]
+                        print(f"   Removed user {user_id}")
+        
+        # Update all fingerprints to use the new device-specific method
+        for user_id_str, data in fingerprints.items():
+            # Update to use shared device fingerprint
+            data["fingerprint"] = generate_device_fingerprint()
+            data["device_id"] = shared_device_id  # Use shared device ID
+            data["last_used"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        
+        save_device_fingerprints(fingerprints)
+        
+        # Clean up old user-specific device files
+        cleaned_files = 0
+        for file in os.listdir('.'):
+            if file.startswith('device_id_') and file.endswith('.txt'):
+                os.remove(file)
+                cleaned_files += 1
+        
+        print(f"✅ Migration complete!")
+        print(f"   - Updated {len(fingerprints)} user records")
+        print(f"   - Cleaned {cleaned_files} old device files")
+        print(f"   - All users now use shared device ID: {shared_device_id}")
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ Error migrating device system: {e}")
+        return False
+
+# Add this to your main section to run migration once
+# Add this to your main section to run migration once
+if __name__ == "__main__":
+    print("🤖 TMZ BRAND Quiz Bot Started!")
+    
+    # Clean up the old shared device ID file and migrate
+    cleanup_shared_device_id()
+    
+    # Migrate to new device system
+    print("🔄 Migrating to strict device fingerprinting...")
+    
+    try:
+        fingerprints = load_device_fingerprints()
+        print(f"Found {len(fingerprints)} registered devices")
+        
+        # Create a shared device ID file if it doesn't exist
+        shared_device_id = get_device_id()
+        print(f"Shared device ID: {shared_device_id}")
+        
+        # Update all fingerprints to use the new device-specific method
+        for user_id_str, data in fingerprints.items():
+            # Update to use shared device fingerprint
+            data["fingerprint"] = generate_device_fingerprint()
+            data["device_id"] = shared_device_id  # Use shared device ID
+            data["last_used"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        
+        save_device_fingerprints(fingerprints)
+        
+        # Clean up old user-specific device files
+        cleaned_files = 0
+        for file in os.listdir('.'):
+            if file.startswith('device_id_') and file.endswith('.txt'):
+                os.remove(file)
+                cleaned_files += 1
+        
+        print(f"✅ Migration complete!")
+        print(f"   - Updated {len(fingerprints)} user records")
+        print(f"   - Cleaned {cleaned_files} old device files")
+        print(f"   - All users now use shared device ID: {shared_device_id}")
+        
+    except Exception as e:
+        print(f"❌ Error migrating device system: {e}")
+        
 # === QUIZ MANAGEMENT ===
 @bot.message_handler(commands=['start_quiz'])
 def handle_start_quiz(message):
-    # Delete the command message
     try:
         bot.delete_message(message.chat.id, message.message_id)
     except:
@@ -2085,26 +2335,28 @@ def handle_start_quiz(message):
     user_id = message.from_user.id
     chat_id = message.chat.id
     
-    # Device verification
-    if not verify_user_device(user_id):
+    # STRICT Device verification
+    if not verify_user_device_strict(user_id):
         msg = bot.send_message(chat_id,
             "❌ <b>DEVICE VERIFICATION FAILED</b>\n\n"
             "You cannot start the quiz from this device.\n"
-            "Please use your registered device or contact admin.",
+            "Please use your registered device.",
             parse_mode='HTML'
         )
         schedule_auto_delete(chat_id, msg.message_id)
         return
     
+    # Rest of your start_quiz logic remains the same...
     if has_user_completed_quiz(user_id):
         msg = bot.send_message(chat_id, 
             "❌ <b>Access Denied</b>\n\n"
-            "You have already completed this quiz. Each participant can only attempt the quiz once.\n\n"
-            "Use /leaderboard to view the current rankings.",
+            "You have already completed this quiz.",
             parse_mode='HTML'
         )
         schedule_auto_delete(chat_id, msg.message_id)
         return
+    
+    # Continue with existing quiz start logic...
     
     if not is_quiz_active():
         msg = bot.send_message(chat_id,
@@ -2261,8 +2513,8 @@ def handle_answer(call):
         user_id = call.from_user.id
         chat_id = call.message.chat.id
         
-        # Device verification
-        if not verify_user_device(user_id):
+        # STRICT Device verification
+        if not verify_user_device_simple(user_id):
             bot.answer_callback_query(call.id, "❌ Device verification failed! Use your registered device.", show_alert=True)
             return
         
@@ -3127,10 +3379,15 @@ if __name__ == "__main__":
     print("🤖 TMZ BRAND Quiz Bot Started!")
     print("📊 Features: One-time quiz, Admin panel, Edit questions, Leaderboard")
     print("⚡ Instant mode: Questions advance when all participants answer")
-    print("📱 DEVICE FINGERPRINTING: One device per user enforced")
-    print("🗑️ Auto-delete: All messages vanish after 30s, start message after 5min")
+    print("📱 ENHANCED DEVICE FINGERPRINTING: STRICT one device per user enforced")
+    print("🚫 ANTI-CHEAT: Multiple accounts on same device are BLOCKED")
+    print("⏱️ Reduced question time: 12 seconds per question")
+    print("🗑️ Auto-delete: All messages vanish after configured time")
     print("🔧 Enhanced state management with comprehensive clearing")
     print("👤 User Editing: Full user data management in admin panel")
+    
+    # Clean up the old shared device ID file
+    cleanup_shared_device_id()
     
     # Ensure data files exist
     for file in [CONFIG["QUESTIONS_FILE"], CONFIG["PARTICIPANTS_FILE"], CONFIG["QUIZ_COMPLETION_FILE"], CONFIG["DEVICE_FINGERPRINT_FILE"]]:
