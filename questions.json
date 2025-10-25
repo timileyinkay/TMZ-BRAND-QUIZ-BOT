@@ -1,4 +1,70 @@
 {
-  "questions": [],
-  "question_time": 12
+  "questions": [
+    {
+      "question": "What shines brightly in the night sky by reflecting light?",
+      "options": [
+        "The Sun",
+        "A light bulb",
+        "The Moon",
+        "A star",
+        "A mirror"
+      ],
+      "correct_index": 2
+    },
+    {
+      "question": "What is used to unlock a door?",
+      "options": [
+        "A car",
+        "A key",
+        "A driver",
+        "A road",
+        "An engine"
+      ],
+      "correct_index": 1
+    },
+    {
+      "question": "Who is the person that creates a novel?",
+      "options": [
+        "A writer",
+        "A pen",
+        "A story",
+        "An idea",
+        "A reader"
+      ],
+      "correct_index": 0
+    },
+    {
+      "question": "Who catches the fish?",
+      "options": [
+        "A fisherman",
+        "A fishing rod",
+        "The river",
+        "The fish",
+        "The boat"
+      ],
+      "correct_index": 0
+    },
+    {
+      "question": "Who performs the song on stage?",
+      "options": [
+        "A singer",
+        "A song",
+        "The music",
+        "The microphone",
+        "The audience"
+      ],
+      "correct_index": 0
+    },
+    {
+      "question": "Who is responsible for planting and tending to the flowers?",
+      "options": [
+        "A gardener",
+        "Water",
+        "The sun",
+        "The soil",
+        "The plant"
+      ],
+      "correct_index": 0
+    }
+  ]
 }
