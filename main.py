@@ -2600,8 +2600,6 @@ def handle_answer(call):
                     stop_countdown(chat_id)
             else:
                 correct_letter = chr(65 + state.questions[q_idx].correct_index)
-                bot.answer_callback_query(call.id, f"❌ Wrong! Correct answer was {correct_letter}")
-                feedback = f"❌ <b>WRONG!</b> {participant_name} - Correct answer was {correct_letter}"
 
             # Send feedback message
             feedback_msg = bot.send_message(chat_id, feedback, parse_mode='HTML')
