@@ -69,10 +69,16 @@ CONFIG.setdefault("SHUFFLE_OPTIONS", True)
 CONFIG.setdefault("SHUFFLE_SEED", None)
 
 # === ENHANCED DEVICE FINGERPRINTING ===
-def get_device_id():
-    """Get a persistent device identifier that's the same for all users on this device"""
+def get_device_id(user_id=None):
+    """Get a persistent device identifier specific to each user"""
     try:
-        device_id_file = "device_id.txt"
+        if user_id is None:
+            # This should rarely happen, but provide a fallback
+            return f"fallback_{uuid.uuid4()}"
+            
+        # User-specific device ID file
+        device_id_file = f"device_id_{user_id}.txt"
+        
         if os.path.exists(device_id_file):
             with open(device_id_file, 'r') as f:
                 existing_id = f.read().strip()
@@ -88,17 +94,26 @@ def get_device_id():
         print(f"Error getting device ID: {e}")
         return f"fallback_{uuid.uuid4()}"
 
-def generate_device_fingerprint():
-    """Generate a device fingerprint that's the same for all users on this device"""
+def generate_device_fingerprint(user_id=None):
+    """Generate a device fingerprint that combines device and user identity"""
     try:
-        device_id = get_device_id()
-        # Device-specific fingerprint (no user ID in the mix)
-        fingerprint_data = f"{device_id}"
+        # Get user-specific device ID
+        device_id = get_device_id(user_id)
+        
+        # Include both device ID and user ID for uniqueness
+        if user_id:
+            fingerprint_data = f"{device_id}_{user_id}"
+        else:
+            fingerprint_data = f"{device_id}"
+            
         fingerprint = hashlib.sha256(fingerprint_data.encode()).hexdigest()
         return fingerprint
     except Exception as e:
         print(f"Error generating device fingerprint: {e}")
-        return hashlib.sha256(f"device_fallback".encode()).hexdigest()
+        if user_id:
+            return hashlib.sha256(f"fallback_{user_id}".encode()).hexdigest()
+        return hashlib.sha256(f"fallback_{uuid.uuid4()}".encode()).hexdigest()
+    
 def load_device_fingerprints():
     """Load device fingerprints from file"""
     try:
@@ -130,7 +145,7 @@ def register_user_device_strict(user_id):
     fingerprints = load_device_fingerprints()
     user_id_str = str(user_id)
     
-    current_fingerprint = generate_device_fingerprint()  # Use device-specific fingerprint
+    current_fingerprint = generate_device_fingerprint(user_id)
     
     # Check if this device is already used by another user
     for existing_user_id, data in fingerprints.items():
@@ -154,7 +169,7 @@ def register_user_device_strict(user_id):
         "fingerprint": current_fingerprint,
         "registered_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
         "last_used": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
-        "device_id": get_device_id()  # Use the shared device ID
+        "device_id": get_device_id(user_id)
     }
     save_device_fingerprints(fingerprints)
     return True, "device_registered"
@@ -167,7 +182,7 @@ def verify_user_device_strict(user_id):
     if user_id_str not in fingerprints:
         return False
     
-    current_fingerprint = generate_device_fingerprint()  # Use device-specific fingerprint
+    current_fingerprint = generate_device_fingerprint(user_id)
     stored_fingerprint = fingerprints[user_id_str].get("fingerprint")
     
     # Update last used
@@ -175,16 +190,6 @@ def verify_user_device_strict(user_id):
     save_device_fingerprints(fingerprints)
     
     return current_fingerprint == stored_fingerprint
-
-def save_device_fingerprints(fingerprints):
-    """Save device fingerprints to file"""
-    try:
-        with open(CONFIG["DEVICE_FINGERPRINT_FILE"], 'w', encoding='utf-8') as f:
-            json.dump(fingerprints, f, indent=2, ensure_ascii=False)
-        return True
-    except Exception as e:
-        print(f"Error saving device fingerprints: {e}")
-        return False
 
 def cleanup_shared_device_id():
     """Clean up the old shared device ID file"""
@@ -1016,6 +1021,46 @@ def handle_reset_all_devices(message):
         
     except Exception as e:
         print(f"Error resetting devices: {e}")
+        msg = bot.send_message(message.chat.id, "❌ Error resetting devices.")
+        schedule_auto_delete(message.chat.id, msg.message_id)
+
+@bot.message_handler(commands=['fix_devices'])
+def handle_fix_devices(message):
+    """Admin command to fix device fingerprinting"""
+    user_id = message.from_user.id
+    if not is_admin(user_id):
+        msg = bot.send_message(message.chat.id, "❌ Admin only command.")
+        schedule_auto_delete(message.chat.id, msg.message_id)
+        return
+    
+    try:
+        bot.delete_message(message.chat.id, message.message_id)
+    except:
+        pass
+    
+    try:
+        # Clear all device fingerprints
+        fingerprints = {}
+        with open(CONFIG["DEVICE_FINGERPRINT_FILE"], 'w', encoding='utf-8') as f:
+            json.dump(fingerprints, f, indent=2, ensure_ascii=False)
+        
+        # Clean up all device ID files
+        for file in os.listdir('.'):
+            if file.startswith('device_id_') and file.endswith('.txt'):
+                os.remove(file)
+            elif file == "device_id.txt":
+                os.remove(file)
+        
+        msg = bot.send_message(
+            message.chat.id,
+            "✅ Device system reset!\n\n"
+            "All users will need to register their devices again with the new fingerprinting system.",
+            parse_mode='HTML'
+        )
+        schedule_auto_delete(message.chat.id, msg.message_id)
+        
+    except Exception as e:
+        print(f"Error fixing devices: {e}")
         msg = bot.send_message(message.chat.id, "❌ Error resetting devices.")
         schedule_auto_delete(message.chat.id, msg.message_id)
 
@@ -2075,6 +2120,10 @@ def reopen_quiz_confirmation(call):
     )
     bot.answer_callback_query(call.id)
 
+def generate_user_device_fingerprint(user_id):
+    """Legacy function for debug compatibility"""
+    return generate_device_fingerprint(user_id)
+
 def clear_state_confirmation(call):
     """Confirm state clearing"""
     keyboard = types.InlineKeyboardMarkup()
@@ -2179,7 +2228,7 @@ def handle_debug_device(message):
     
     # Test both old and new fingerprint methods
     old_fp = generate_user_device_fingerprint(user_id)  # User-specific (old)
-    new_fp = generate_device_fingerprint()              # Device-specific (new)
+    new_fp = generate_device_fingerprint(user_id)              # Device-specific (new)
     
     debug_text = "🔧 <b>Device Debug Info</b>\n\n"
     debug_text += f"User ID: <code>{user_id}</code>\n\n"
@@ -2223,107 +2272,6 @@ def handle_debug_device(message):
     msg = bot.send_message(message.chat.id, debug_text, parse_mode='HTML')
     schedule_auto_delete(message.chat.id, msg.message_id)
 
-def migrate_device_system():
-    """Migrate from user-specific to device-specific fingerprinting"""
-    try:
-        fingerprints = load_device_fingerprints()
-        print(f"Found {len(fingerprints)} registered devices")
-        
-        # Create a shared device ID file if it doesn't exist
-        shared_device_id = get_device_id()
-        print(f"Shared device ID: {shared_device_id}")
-        
-        # Group users by their old device IDs to detect sharing
-        device_users_map = {}
-        for user_id_str, data in fingerprints.items():
-            old_device_id = data.get("device_id")
-            if old_device_id not in device_users_map:
-                device_users_map[old_device_id] = []
-            device_users_map[old_device_id].append(user_id_str)
-        
-        # Handle devices with multiple users
-        for device_id, users in device_users_map.items():
-            if len(users) > 1:
-                print(f"⚠️ Device {device_id} has {len(users)} users: {users}")
-                # Keep the first user, remove others
-                keep_user = users[0]
-                remove_users = users[1:]
-                
-                for user_id in remove_users:
-                    if user_id in fingerprints:
-                        del fingerprints[user_id]
-                        print(f"   Removed user {user_id}")
-        
-        # Update all fingerprints to use the new device-specific method
-        for user_id_str, data in fingerprints.items():
-            # Update to use shared device fingerprint
-            data["fingerprint"] = generate_device_fingerprint()
-            data["device_id"] = shared_device_id  # Use shared device ID
-            data["last_used"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-        
-        save_device_fingerprints(fingerprints)
-        
-        # Clean up old user-specific device files
-        cleaned_files = 0
-        for file in os.listdir('.'):
-            if file.startswith('device_id_') and file.endswith('.txt'):
-                os.remove(file)
-                cleaned_files += 1
-        
-        print(f"✅ Migration complete!")
-        print(f"   - Updated {len(fingerprints)} user records")
-        print(f"   - Cleaned {cleaned_files} old device files")
-        print(f"   - All users now use shared device ID: {shared_device_id}")
-        
-        return True
-        
-    except Exception as e:
-        print(f"❌ Error migrating device system: {e}")
-        return False
-
-# Add this to your main section to run migration once
-# Add this to your main section to run migration once
-if __name__ == "__main__":
-    print("🤖 TMZ BRAND Quiz Bot Started!")
-    
-    # Clean up the old shared device ID file and migrate
-    cleanup_shared_device_id()
-    
-    # Migrate to new device system
-    print("🔄 Migrating to strict device fingerprinting...")
-    
-    try:
-        fingerprints = load_device_fingerprints()
-        print(f"Found {len(fingerprints)} registered devices")
-        
-        # Create a shared device ID file if it doesn't exist
-        shared_device_id = get_device_id()
-        print(f"Shared device ID: {shared_device_id}")
-        
-        # Update all fingerprints to use the new device-specific method
-        for user_id_str, data in fingerprints.items():
-            # Update to use shared device fingerprint
-            data["fingerprint"] = generate_device_fingerprint()
-            data["device_id"] = shared_device_id  # Use shared device ID
-            data["last_used"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-        
-        save_device_fingerprints(fingerprints)
-        
-        # Clean up old user-specific device files
-        cleaned_files = 0
-        for file in os.listdir('.'):
-            if file.startswith('device_id_') and file.endswith('.txt'):
-                os.remove(file)
-                cleaned_files += 1
-        
-        print(f"✅ Migration complete!")
-        print(f"   - Updated {len(fingerprints)} user records")
-        print(f"   - Cleaned {cleaned_files} old device files")
-        print(f"   - All users now use shared device ID: {shared_device_id}")
-        
-    except Exception as e:
-        print(f"❌ Error migrating device system: {e}")
-        
 # === QUIZ MANAGEMENT ===
 @bot.message_handler(commands=['start_quiz'])
 def handle_start_quiz(message):
@@ -3388,6 +3336,37 @@ if __name__ == "__main__":
     
     # Clean up the old shared device ID file
     cleanup_shared_device_id()
+    
+    # Fix device fingerprinting system
+    print("🔄 Setting up strict device fingerprinting...")
+    
+    try:
+        fingerprints = load_device_fingerprints()
+        print(f"Found {len(fingerprints)} registered devices")
+        
+        # Update all fingerprints to use user-specific device IDs
+        updated_count = 0
+        for user_id_str, data in fingerprints.items():
+            user_id = int(user_id_str)
+            
+            # Generate user-specific device ID and fingerprint
+            user_device_id = get_device_id(user_id)
+            user_fingerprint = generate_device_fingerprint(user_id)
+            
+            # Update the data
+            data["fingerprint"] = user_fingerprint
+            data["device_id"] = user_device_id
+            data["last_used"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+            updated_count += 1
+        
+        save_device_fingerprints(fingerprints)
+        
+        print(f"✅ Device system updated!")
+        print(f"   - Updated {updated_count} user records")
+        print(f"   - Each user now has unique device ID")
+        
+    except Exception as e:
+        print(f"❌ Error setting up device system: {e}")
     
     # Ensure data files exist
     for file in [CONFIG["QUESTIONS_FILE"], CONFIG["PARTICIPANTS_FILE"], CONFIG["QUIZ_COMPLETION_FILE"], CONFIG["DEVICE_FINGERPRINT_FILE"]]:
